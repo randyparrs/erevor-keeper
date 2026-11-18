@@ -1,0 +1,24 @@
+{
+  "name": "erevor-keeper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Boundary keeper for the Erevor UP/DOWN prediction market on Elysium",
+  "type": "module",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/unit.test.js dist/test/events.test.js dist/test/rpc.test.js dist/test/plan.test.js dist/test/once.test.js",
+    "start": "node dist/src/index.js",
+    "once": "node dist/src/index.js --once"
+  },
+  "dependencies": {
+    "viem": "2.58.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "~5.9.3"
+  }
+}
