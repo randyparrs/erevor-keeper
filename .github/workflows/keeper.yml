@@ -1,0 +1,64 @@
+name: Erevor Keeper
+
+# One keeper pass per 5 minute UTC boundary on Elysium testnet.
+#
+# Timing: executeBoundary must land within bufferSeconds (30 s) after each boundary and a runner needs 30 to 90 s to
+# start, so the job is triggered about 2 minutes BEFORE each boundary (minutes 3, 8, 13, ...). `--once` waits for the
+# boundary, executes it and exits. A runner that arrives late but inside the window executes immediately.
+#
+# Trigger: an external cron-job.org job calls the workflow_dispatch API at minutes 3,8,...,58. GitHub's own schedule
+# stays as a best effort backup; a late or duplicated run is harmless (the contract skips executed boundaries).
+#
+# Cost: free and unlimited minutes on a public repository.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '3-58/5 * * * *'
+
+# A single group: two passes never run in parallel, a new trigger waits for the running one.
+concurrency:
+  group: erevor-keeper-elysium-testnet
+  cancel-in-progress: false
+
+jobs:
+  keeper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+
+    steps:
+      - name: Record runner start
+        run: echo "RUNNER_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js with npm cache
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: Run keeper for the next boundary
+        run: node dist/src/index.js --once
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          KEEPER_PRIVATE_KEY: ${{ secrets.KEEPER_PRIVATE_KEY }}
+          RPC_FALLBACK_URL: https://testnet-rpc.elysium.kinetiq.xyz
+          CHAIN_ID: '99801'
+          MARKET_ADDRESS: '0x64AE6fe468d9494629E95F7257E9541205d21a69'
+          PUSH_PRICES: 'true'
+          HL_INFO_URL: https://api.hyperliquid.xyz/info
+          HL_PRICE_FIELD: oraclePx
+          MIN_BALANCE_HYPE: '0.1'
+          IDLE_MODE: 'true'
+          IDLE_REFRESH_SECONDS: '1800'
+          TRIGGER_LEAD_SECONDS: '120'
+          LOG_LEVEL: info
