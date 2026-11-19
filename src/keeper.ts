@@ -17,19 +17,16 @@ import {
   type WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { keeperSignedPriceSourceAbi, predictionMarketAbi } from "./abi.js";
+import { predictionMarketAbi, predictionMarketLensAbi, pythBoundaryReaderAbi } from "./abi.js";
 import { readBoundary, type BoundarySnapshot, type StaticMarket } from "./boundary-read.js";
 import type { KeeperConfig } from "./config.js";
 import { logSummary, summarizeLogs } from "./events.js";
-import { hasOpenRound, planBoundary, type BoundaryPlan } from "./plan.js";
-import { MULTICALL3, OPERATOR_ROLE, PRICE_PUSHER_ROLE } from "./ids.js";
+import { captureFirstUpdates, type FirstUpdateCapture, type StreamResult } from "./hermes.js";
+import { assetIdToSymbol, MULTICALL3 } from "./ids.js";
 import { log } from "./log.js";
-import { assetIdToSymbol, fetchPrices } from "./prices.js";
+import { hasOpenRound, planBoundary, type BoundaryPlan } from "./plan.js";
 import { RpcProvider, type RpcEvent } from "./rpc.js";
 import { BASE_INTERVAL, backoffMs, chooseOnceTarget, nextBoundary, selectDue, sleep, type MarketInfo } from "./schedule.js";
-
-const ROUND_PENDING = 1;
-const ROUND_LOCKED = 2;
 
 /** Pull a readable reason out of a viem error, including custom contract error names. */
 export function describeError(err: unknown): Record<string, unknown> {
@@ -46,8 +43,8 @@ export function describeError(err: unknown): Record<string, unknown> {
 export function makeChain(chainId: number, rpcUrl: string): Chain {
   return defineChain({
     id: chainId,
-    name: `elysium-${chainId}`,
-    nativeCurrency: { name: "HYPE", symbol: "HYPE", decimals: 18 },
+    name: chainId === 421614 ? "arbitrum-sepolia" : `chain-${chainId}`,
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     rpcUrls: { default: { http: [rpcUrl] } },
     contracts: { multicall3: { address: MULTICALL3 } },
   });
@@ -58,15 +55,54 @@ export function logRpcEvent(e: RpcEvent): void {
   else log("warn", "rpc retry", { endpoint: e.endpoint, method: e.method, attempt: e.attempt, delayMs: e.delayMs, reason: e.reason });
 }
 
+/**
+ * Logs PYTH_KEY_INVALID_OR_EXPIRED when Hermes rejected the API key. It is an error line, so a CI pass exits non
+ * zero and the workflow run fails. Returns true when the key was rejected.
+ */
+export function reportAuthError(result: Pick<StreamResult, "authError">, boundary: number): boolean {
+  if (!result.authError) return false;
+  log("error", "PYTH_KEY_INVALID_OR_EXPIRED", {
+    boundary,
+    status: result.authError.status,
+    detail: result.authError.detail,
+    note: "Hermes rejected PYTH_API_KEY (missing, expired, invalid or without access to a feed); renew the key secret",
+  });
+  return true;
+}
+
+class KeyRejectedError extends Error {}
+
+/** Markets of `due` whose asset has a captured Pyth update, and the symbols that have none. */
+export function splitByCapture(
+  due: MarketInfo[],
+  capture: FirstUpdateCapture,
+  feedIds: Record<string, Hex>,
+): { ready: MarketInfo[]; missingSymbols: string[]; feeds: Hex[] } {
+  const ready: MarketInfo[] = [];
+  const missing = new Set<string>();
+  const feeds: Hex[] = [];
+  for (const m of due) {
+    const feed = feedIds[m.symbol];
+    if (feed && capture.has(feed)) {
+      ready.push(m);
+      if (!feeds.includes(feed)) feeds.push(feed);
+    } else {
+      missing.add(m.symbol);
+    }
+  }
+  return { ready, missingSymbols: [...missing], feeds };
+}
+
 export class Keeper {
   readonly rpc: RpcProvider;
   private readonly publicClient: PublicClient<Transport, Chain>;
   private readonly walletClient: WalletClient<Transport, Chain, Account>;
   private readonly account: Account;
   private readonly market: Address;
+  private readonly lens: Address;
+  private reader: Address | undefined;
   private readonly stop = new AbortController();
   private staticMarkets: StaticMarket[] = [];
-  private readonly pusherBySource = new Map<string, boolean>();
   private bufferSeconds = 30;
   private lastBalanceCheck = 0;
   private cleanBoundaries = 0;
@@ -88,6 +124,7 @@ export class Keeper {
     this.publicClient = createPublicClient({ chain, transport });
     this.walletClient = createWalletClient({ chain, transport, account: this.account });
     this.market = cfg.marketAddress;
+    this.lens = cfg.lensAddress;
   }
 
   shutdown(): void {
@@ -98,38 +135,41 @@ export class Keeper {
     return this.stop.signal.aborted;
   }
 
-  /** Startup checks: chain id, roles (the only time roles are read), market list and balance. */
+  /**
+   * Startup checks: chain id, lens wiring, market list, Pyth feed ids and balance. The keeper needs no role: boundary
+   * execution is permissionless and the wallet only pays gas and Pyth fees.
+   */
   async preflight(): Promise<void> {
     const chainId = await this.publicClient.getChainId();
     if (chainId !== this.cfg.chainId) throw new Error(`RPC chain id ${chainId} does not match CHAIN_ID ${this.cfg.chainId}`);
 
-    const [source, isOperator, bufferSeconds] = (await this.publicClient.multicall({
+    const [lensMarket, reader, params] = (await this.publicClient.multicall({
       contracts: [
-        { address: this.market, abi: predictionMarketAbi, functionName: "priceSource" },
-        { address: this.market, abi: predictionMarketAbi, functionName: "hasRole", args: [OPERATOR_ROLE, this.account.address] },
-        { address: this.market, abi: predictionMarketAbi, functionName: "bufferSeconds" },
+        { address: this.lens, abi: predictionMarketLensAbi, functionName: "market" },
+        { address: this.market, abi: predictionMarketAbi, functionName: "reader" },
+        { address: this.lens, abi: predictionMarketLensAbi, functionName: "getParams" },
       ] as never,
       allowFailure: false,
       batchSize: 0,
-    })) as unknown as [Address, boolean, bigint];
-    this.bufferSeconds = Number(bufferSeconds);
-
-    const missing: string[] = [];
-    if (!isOperator) missing.push(`OPERATOR_ROLE on market ${this.market}`);
-    if (this.cfg.pushPrices && !(await this.isPusher(source))) missing.push(`PRICE_PUSHER_ROLE on price source ${source}`);
-    if (missing.length > 0) {
-      log("error", "keeper cannot start: missing role", { keeper: this.account.address, missing });
-      throw new Error(`missing role(s): ${missing.join(", ")}`);
+    })) as unknown as [Address, Address, { bufferSeconds: bigint }];
+    if (lensMarket.toLowerCase() !== this.market.toLowerCase()) {
+      throw new Error(`LENS_ADDRESS reads market ${lensMarket}, not MARKET_ADDRESS ${this.market}`);
     }
+    this.reader = reader;
+    this.bufferSeconds = Number(params.bufferSeconds);
 
     await this.loadStaticMarkets();
+    const unknown = [...new Set(this.staticMarkets.map((m) => m.symbol))].filter((s) => !this.cfg.feedIds[s]);
+    if (unknown.length > 0) throw new Error(`no Pyth feed id configured for ${unknown.join(", ")} (set FEED_IDS)`);
+
     log("info", "preflight ok", {
       keeper: this.account.address,
       market: this.market,
+      lens: this.lens,
+      reader,
       chainId,
       markets: this.staticMarkets.length,
-      pushPrices: this.cfg.pushPrices,
-      priceField: this.cfg.hlPriceField,
+      hermes: this.cfg.hermesUrl,
       fallbackRpc: Boolean(this.cfg.rpcFallbackUrl),
       idleMode: this.cfg.idleMode,
       idleRefreshSeconds: this.cfg.idleRefreshSeconds,
@@ -160,7 +200,7 @@ export class Keeper {
       late,
     });
     if (previous !== undefined) await this.checkMissed(previous);
-    if (!late) await sleep(target * 1000 + this.cfg.wakeDelayMs - Date.now(), this.stop.signal);
+    if (!late) await sleep(target * 1000 - this.cfg.streamLeadMs - Date.now(), this.stop.signal);
     if (this.stopped) return;
     try {
       await this.handleBoundary(target);
@@ -173,7 +213,7 @@ export class Keeper {
   /** Logs MISSED_WITH_BETS when a due market of `boundary` still holds a round with bets that was never executed. */
   private async checkMissed(boundary: number): Promise<void> {
     try {
-      const snap = await readBoundary(this.publicClient, this.market, this.staticMarkets, boundary);
+      const snap = await readBoundary(this.publicClient, this.market, this.lens, this.staticMarkets, boundary);
       const missed = selectDue(snap.markets, boundary).filter((m) => hasOpenRound(snap, m, boundary));
       if (missed.length > 0) {
         log("error", "MISSED_WITH_BETS", {
@@ -187,13 +227,13 @@ export class Keeper {
     }
   }
 
-  /** Main loop: wake at every 5 minute boundary and execute what is due. */
+  /** Main loop: open the Hermes stream shortly before every 5 minute boundary and execute what is due. */
   async run(once = false): Promise<void> {
     if (once) return this.runOnce();
     while (!this.stopped) {
-      const boundary = nextBoundary(Math.floor(Date.now() / 1000), BASE_INTERVAL);
-      const wakeAt = boundary * 1000 + this.cfg.wakeDelayMs;
-      log("debug", "sleeping until boundary", { boundary, wakeAt: new Date(wakeAt).toISOString() });
+      const boundary = nextBoundary(Math.floor(Date.now() / 1000) + Math.ceil(this.cfg.streamLeadMs / 1000), BASE_INTERVAL);
+      const wakeAt = boundary * 1000 - this.cfg.streamLeadMs;
+      log("debug", "sleeping until stream lead", { boundary, wakeAt: new Date(wakeAt).toISOString() });
       await sleep(wakeAt - Date.now(), this.stop.signal);
       if (this.stopped) break;
       try {
@@ -208,20 +248,44 @@ export class Keeper {
           log("warn", "balance check failed", describeError(err));
         }
       }
-      if (once) break;
     }
     log("info", "keeper stopped");
   }
 
+  /**
+   * One boundary: the Hermes stream is opened first (so the first update after the boundary is never missed), the
+   * chain is read once the boundary passed, and the due markets are executed with the captured updates.
+   */
   async handleBoundary(boundary: number): Promise<void> {
     const deadlineMs = (boundary + this.bufferSeconds) * 1000 - this.cfg.safetyMarginMs;
+    // Capture ends early enough to leave time for the transaction.
+    const captureDeadlineMs = Math.max(boundary * 1000 + 3_000, deadlineMs - 8_000);
+    const streamStop = new AbortController();
+    const onStop = () => streamStop.abort();
+    this.stop.signal.addEventListener("abort", onStop, { once: true });
+    const feeds = [...new Set(this.staticMarkets.map((m) => this.cfg.feedIds[m.symbol] as Hex))];
+    const capturing = captureFirstUpdates({
+      hermesUrl: this.cfg.hermesUrl,
+      apiKey: this.cfg.pythApiKey,
+      ids: feeds,
+      boundary,
+      deadlineMs: captureDeadlineMs,
+      signal: streamStop.signal,
+      onEvent: (e) => {
+        if (e.type === "connected") log(e.attempt > 1 ? "warn" : "debug", "hermes stream connected", { boundary, attempt: e.attempt });
+        else log("warn", "hermes stream failed, reconnecting inside the window", { boundary, attempt: e.attempt, reason: e.reason });
+      },
+    });
+
     this.rpc.setDeadline(deadlineMs);
     this.rpc.resetRequestCount();
     try {
+      await sleep(boundary * 1000 + this.cfg.wakeDelayMs - Date.now(), this.stop.signal);
+      if (this.stopped) return;
       for (let attempt = 1; ; attempt++) {
         const started = Date.now();
         try {
-          const ok = await this.attemptBoundary(boundary, deadlineMs, attempt);
+          const ok = await this.attemptBoundary(boundary, deadlineMs, attempt, capturing, streamStop);
           if (ok) {
             this.cleanBoundaries = attempt === 1 ? this.cleanBoundaries + 1 : 0;
             const plan = this.lastPlan;
@@ -245,6 +309,7 @@ export class Keeper {
             return;
           }
         } catch (err) {
+          if (err instanceof KeyRejectedError) return;
           log("warn", "boundary attempt failed", { boundary, attempt, ms: Date.now() - started, ...describeError(err) });
         }
         const wait = backoffMs(attempt);
@@ -263,12 +328,23 @@ export class Keeper {
         await sleep(wait, this.stop.signal);
       }
     } finally {
+      streamStop.abort();
+      this.stop.signal.removeEventListener("abort", onStop);
+      // A rejected key is reported at every boundary, also when nothing had to be executed.
+      const result = await capturing.catch(() => undefined);
+      if (result) reportAuthError(result, boundary);
       this.rpc.setDeadline(undefined);
     }
   }
 
   /** One full attempt. Returns true when nothing else is needed for this boundary. */
-  private async attemptBoundary(boundary: number, deadlineMs: number, attempt: number): Promise<boolean> {
+  private async attemptBoundary(
+    boundary: number,
+    deadlineMs: number,
+    attempt: number,
+    capturing: ReturnType<typeof captureFirstUpdates>,
+    streamStop: AbortController,
+  ): Promise<boolean> {
     this.lastPlan = undefined;
     this.lastInclusionDelay = undefined;
     let snap = await this.readSnapshot(boundary, deadlineMs);
@@ -279,13 +355,12 @@ export class Keeper {
     }
     this.bufferSeconds = snap.bufferSeconds;
 
-    if (snap.paused) {
-      log("warn", "market is paused, skipping boundary", { boundary });
-      return true;
-    }
+    // Pause only blocks new bets: rounds with bets must still lock and close, so a paused market is executed too.
+    if (snap.paused) log("warn", "market is paused: new bets are blocked, rounds with bets still settle", { boundary });
     const plan = planBoundary(snap, boundary, this.cfg.idleMode, this.cfg.idleRefreshSeconds);
     this.lastPlan = plan;
     if (plan.execute.length === 0) {
+      streamStop.abort();
       log("info", plan.mode === "idle" ? "boundary skipped (idle): no rounds with bets" : "nothing due", {
         boundary,
         marketsDue: plan.due,
@@ -293,16 +368,48 @@ export class Keeper {
       });
       return true;
     }
-    const due = plan.execute;
-    const ids = due.map((m) => m.id);
 
-    if (this.cfg.pushPrices) await this.pushPrices(boundary, due, snap, deadlineMs, attempt);
+    const result = await capturing;
+    const { capture, failed } = result;
+    // Reported once in handleBoundary; retrying with a rejected key cannot help.
+    if (result.authError) throw new KeyRejectedError();
+    const { ready, missingSymbols, feeds } = splitByCapture(plan.execute, capture, this.cfg.feedIds);
+    for (const symbol of missingSymbols) {
+      const feed = this.cfg.feedIds[symbol] as Hex;
+      log("warn", "no usable Pyth update for asset, its markets are not executed", {
+        boundary,
+        asset: symbol,
+        reason: capture.reasonFor(feed, failed),
+      });
+    }
+    if (ready.length === 0) throw new Error("no Pyth update captured for any due asset");
+
+    const data = capture.updateData(feeds);
+    const reader = this.reader as Address;
+    const feePerCall = (await this.publicClient.readContract({
+      address: reader,
+      abi: pythBoundaryReaderAbi,
+      functionName: "updateFee",
+      args: [data],
+    })) as bigint;
+    // The market parses every asset in its own Pyth call.
+    const value = feePerCall * BigInt(feeds.length);
+    const ids = ready.map((m) => m.id);
+    const captured = feeds.map((f) => {
+      const c = capture.captured.get(f)!;
+      return { feed: f, publishTime: c.publishTime, prevPublishTime: c.prevPublishTime, price: c.price, expo: c.expo };
+    });
 
     if (this.cfg.dryRun) {
-      if (!this.cfg.pushPrices) {
-        await this.publicClient.simulateContract({ account: this.account, address: this.market, abi: predictionMarketAbi, functionName: "executeBoundary", args: [ids] });
-      }
-      log("info", "dry run: would execute", { boundary, markets: due.map(describeMarket) });
+      await this.publicClient.simulateContract({
+        account: this.account,
+        address: this.market,
+        abi: predictionMarketAbi,
+        functionName: "executeBoundary",
+        args: [ids, data],
+        value,
+      });
+      log("info", "dry run: would execute", { boundary, markets: ready.map(describeMarket), pythFeeWei: value, captured });
       return true;
     }
 
@@ -310,42 +417,56 @@ export class Keeper {
       address: this.market,
       abi: predictionMarketAbi,
       functionName: "executeBoundary",
-      args: [ids],
+      args: [ids, data],
+      value,
     });
     const receipt = await this.waitReceipt(hash, deadlineMs);
     const block = await this.publicClient.getBlock({ blockNumber: receipt.blockNumber });
     this.lastInclusionDelay = Number(block.timestamp) - boundary;
     const summary = summarizeLogs(receipt.logs as Log[], this.market);
     logSummary(summary);
-    log(summary.skipped.length + summary.rejected.length + summary.rebased.length > 0 ? "warn" : "info", "boundary executed", {
+    const notable = summary.skipped.length + summary.rejected.length + summary.wideConfidence.length + summary.rebased.length;
+    log(notable > 0 ? "warn" : "info", "boundary executed", {
       boundary,
       attempt,
       tx: hash,
       block: receipt.blockNumber,
       inclusionDelaySeconds: this.lastInclusionDelay,
       gasUsed: receipt.gasUsed,
+      pythFeeWei: value,
       lagMs: Date.now() - boundary * 1000,
       mode: plan.mode,
       marketsWithBets: plan.marketsWithBets,
-      markets: due.map(describeMarket),
+      markets: ready.map(describeMarket),
+      captured,
       locked: summary.locked,
       closed: summary.closed,
       skipped: summary.skipped.length,
       rejected: summary.rejected.length,
+      wideConfidence: summary.wideConfidence.length,
       rebased: summary.rebased.length,
       voided: summary.voided.length,
     });
 
-    // A market skipped for a missing price recorded nothing on chain and can still be retried in the window.
-    const retry = summary.skipped.filter((s) => s.reason === "PriceUnavailable");
-    if (retry.length > 0) throw new Error(`${retry.length} market(s) skipped for PriceUnavailable, retrying`);
+    const notExecuted = plan.execute.filter((m) => missingSymbols.includes(m.symbol) && hasOpenRound(snap, m, boundary));
+    if (notExecuted.length > 0) {
+      log("error", "MISSED_WITH_BETS", {
+        boundary,
+        markets: notExecuted.map(describeMarket),
+        note: "no usable Pyth update for these assets; their rounds will be voided and fully refundable",
+      });
+    }
+    // The update of a market skipped for PriceUnavailable is the only valid one for this boundary: a retry with the
+    // same data cannot succeed, so it is reported instead of retried.
+    const unavailable = summary.skipped.filter((s) => s.reason === "PriceUnavailable");
+    if (unavailable.length > 0) log("warn", "markets skipped for PriceUnavailable", { boundary, markets: unavailable.map((s) => s.market) });
     return true;
   }
 
   /** Single aggregate3 read; repeats only while the chain clock has not reached the boundary yet. */
   private async readSnapshot(boundary: number, deadlineMs: number): Promise<BoundarySnapshot> {
     for (;;) {
-      const snap = await readBoundary(this.publicClient, this.market, this.staticMarkets, boundary);
+      const snap = await readBoundary(this.publicClient, this.market, this.lens, this.staticMarkets, boundary);
       const skew = Math.floor(Date.now() / 1000) - snap.chainTime;
       if (Math.abs(skew) > 2) log("warn", "clock skew between keeper and chain", { skewSeconds: skew });
       if (snap.chainTime >= boundary) return snap;
@@ -354,79 +475,18 @@ export class Keeper {
     }
   }
 
-  /**
-   * Push fresh prices to every price source the due rounds read: the current source plus any older source still
-   * referenced by the snapshot of a round to lock or close at this boundary (taken from the same multicall read).
-   */
-  private async pushPrices(boundary: number, due: MarketInfo[], snap: BoundarySnapshot, deadlineMs: number, attempt: number): Promise<void> {
-    const byAsset = new Map<Hex, string>();
-    for (const m of due) byAsset.set(m.assetId, m.symbol);
-    const assetIds = [...byAsset.keys()];
-    const symbols = [...byAsset.values()];
-
-    const sources = new Set<string>([snap.priceSource.toLowerCase()]);
-    for (const r of snap.rounds.values()) {
-      if (r.status === ROUND_PENDING || r.status === ROUND_LOCKED) sources.add(r.priceSource.toLowerCase());
-    }
-
-    const prices = await fetchPrices(this.cfg.hlInfoUrl, symbols, this.cfg.hlPriceField, this.cfg.coinOverrides, this.cfg.httpTimeoutMs);
-    if (prices.observedAt < boundary) throw new Error(`local clock ${prices.observedAt} is behind boundary ${boundary}`);
-    const values = symbols.map((s) => {
-      const p = prices.prices.get(s);
-      if (p === undefined) throw new Error(`missing price for ${s}`);
-      return p;
-    });
-    const raw = Object.fromEntries(prices.raw);
-
-    for (const source of sources as Set<Address>) {
-      if (!(await this.isPusher(source))) {
-        log("warn", "no PRICE_PUSHER_ROLE on a snapshot price source, its rounds will void", { source });
-        continue;
-      }
-      const args = [assetIds, values, BigInt(prices.observedAt)] as const;
-      if (this.cfg.dryRun) {
-        await this.publicClient.simulateContract({ account: this.account, address: source, abi: keeperSignedPriceSourceAbi, functionName: "pushPrices", args });
-        log("info", "dry run: would push prices", { boundary, source, observedAt: prices.observedAt, prices: raw });
-        continue;
-      }
-      const hash = await this.walletClient.writeContract({ address: source, abi: keeperSignedPriceSourceAbi, functionName: "pushPrices", args });
-      const receipt = await this.waitReceipt(hash, deadlineMs);
-      log("info", "prices pushed", { boundary, attempt, source, tx: hash, gasUsed: receipt.gasUsed, observedAt: prices.observedAt, prices: raw });
-    }
-  }
-
-  /** PRICE_PUSHER_ROLE check, cached per source (the current source is checked at startup). */
-  private async isPusher(source: Address): Promise<boolean> {
-    const key = source.toLowerCase();
-    const cached = this.pusherBySource.get(key);
-    if (cached !== undefined) return cached;
-    let ok = false;
-    try {
-      ok = await this.publicClient.readContract({
-        address: source,
-        abi: keeperSignedPriceSourceAbi,
-        functionName: "hasRole",
-        args: [PRICE_PUSHER_ROLE, this.account.address],
-      });
-    } catch {
-      ok = false; // not a keeper signed source (for example the HyperCore precompile adapter)
-    }
-    this.pusherBySource.set(key, ok);
-    return ok;
-  }
-
   private async loadStaticMarkets(): Promise<void> {
-    const ids = (await this.publicClient.readContract({ address: this.market, abi: predictionMarketAbi, functionName: "getMarketIds" })) as readonly Hex[];
+    const ids = (await this.publicClient.readContract({ address: this.lens, abi: predictionMarketLensAbi, functionName: "getMarketIds" })) as readonly Hex[];
     const rows = (await this.publicClient.multicall({
-      contracts: ids.map((id) => ({ address: this.market, abi: predictionMarketAbi, functionName: "markets", args: [id] })) as never,
+      contracts: ids.map((id) => ({ address: this.lens, abi: predictionMarketLensAbi, functionName: "getMarket", args: [id] })) as never,
       allowFailure: false,
       batchSize: 0,
-    })) as unknown as readonly (readonly [Hex, number])[];
-    this.staticMarkets = rows.map(([assetId, interval], i) => ({
+    })) as unknown as readonly { assetId: Hex; interval: number }[];
+    this.staticMarkets = rows.map((row, i) => ({
       id: ids[i] as Hex,
-      assetId,
-      symbol: assetIdToSymbol(assetId),
-      interval: Number(interval),
+      assetId: row.assetId,
+      symbol: assetIdToSymbol(row.assetId),
+      interval: Number(row.interval),
     }));
   }
 
@@ -434,13 +494,13 @@ export class Keeper {
     this.lastBalanceCheck = Date.now();
     const balance = await this.publicClient.getBalance({ address: this.account.address });
     if (balance < this.cfg.minBalanceWei) {
-      log("warn", "low keeper balance: top up HYPE for gas", {
+      log("warn", "low keeper balance: top up ETH for gas and Pyth fees", {
         keeper: this.account.address,
-        balanceHype: formatEther(balance),
-        thresholdHype: formatEther(this.cfg.minBalanceWei),
+        balanceEth: formatEther(balance),
+        thresholdEth: formatEther(this.cfg.minBalanceWei),
       });
     } else {
-      log("info", "keeper balance", { balanceHype: formatEther(balance) });
+      log("info", "keeper balance", { balanceEth: formatEther(balance) });
     }
   }
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Address, Hex } from "viem";
+import type { Hex } from "viem";
 import type { BoundarySnapshot, RoundView } from "../src/boundary-read.js";
 import { parseRefresh } from "../src/config.js";
 import { assetIdOf, marketIdOf, roundIdOf } from "../src/ids.js";
@@ -8,7 +8,6 @@ import { planBoundary } from "../src/plan.js";
 import type { MarketInfo } from "../src/schedule.js";
 
 const T0 = 1_800_000_000; // aligned to 300, 900 and 1800
-const SOURCE = "0x00000000000000000000000000000000000000bb" as Address;
 
 function market(symbol: string, interval: number): MarketInfo {
   return { id: marketIdOf(assetIdOf(symbol), interval), assetId: assetIdOf(symbol), symbol, interval, active: true, lastBoundary: 0 };
@@ -19,8 +18,8 @@ const eth5 = market("ETH", 300);
 const btc30 = market("BTC", 1800);
 
 function snapshot(rounds: [Hex, number][] = []): BoundarySnapshot {
-  const map = new Map<Hex, RoundView>(rounds.map(([id, status]) => [id, { status, priceSource: SOURCE }]));
-  return { chainTime: T0, paused: false, bufferSeconds: 30, priceSource: SOURCE, marketCount: 3, markets: [btc5, eth5, btc30], rounds: map };
+  const map = new Map<Hex, RoundView>(rounds.map(([id, status]) => [id, { status }]));
+  return { chainTime: T0, paused: false, bufferSeconds: 30, marketCount: 3, markets: [btc5, eth5, btc30], rounds: map };
 }
 
 test("an empty 5 minute boundary is skipped in idle mode, no transaction", () => {

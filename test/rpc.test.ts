@@ -10,7 +10,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { predictionMarketAbi } from "../src/abi.js";
+import { predictionMarketAbi, predictionMarketLensAbi } from "../src/abi.js";
 import { multicall3TimeAbi, readBoundary, type StaticMarket } from "../src/boundary-read.js";
 import { MULTICALL3, assetIdOf, marketIdOf, roundIdOf } from "../src/ids.js";
 import { makeChain } from "../src/keeper.js";
@@ -162,7 +162,7 @@ test("roundIdOf and marketIdOf match the deployed contract", () => {
 
 test("a boundary is read with exactly one eth_call to Multicall3 aggregate3", async () => {
   const MARKET = "0x00000000000000000000000000000000000000aa" as Address;
-  const SOURCE = "0x00000000000000000000000000000000000000bb" as Address;
+  const LENS = "0x00000000000000000000000000000000000000cc" as Address;
   const boundary = 1_800_000_000;
   const markets: StaticMarket[] = [
     { id: marketIdOf(assetIdOf("BTC"), 300), assetId: assetIdOf("BTC"), symbol: "BTC", interval: 300 },
@@ -170,21 +170,22 @@ test("a boundary is read with exactly one eth_call to Multicall3 aggregate3", as
     { id: marketIdOf(assetIdOf("ETH"), 1800), assetId: assetIdOf("ETH"), symbol: "ETH", interval: 1800 },
   ];
   const lockedRound = roundIdOf(markets[0]!.id, boundary - 300);
-  const abi = [...predictionMarketAbi, ...multicall3TimeAbi];
-  const getRoundOutputs = (predictionMarketAbi.find((x) => x.type === "function" && x.name === "getRound") as {
-    outputs: readonly { components: readonly { name: string; type: string }[] }[];
-  }).outputs[0]!.components;
-  const emptyRound = (status: number, priceSource: Address) =>
-    Object.fromEntries(
-      getRoundOutputs.map((c) => [
-        c.name,
-        c.name === "status" ? status : c.name === "priceSource" ? priceSource : c.type === "bool" ? false : c.type.startsWith("bytes") ? stringToHex("", { size: 32 }) : c.type === "address" ? "0x0000000000000000000000000000000000000000" : c.type.startsWith("uint8") ? 0 : 0n,
-      ]),
-    );
+  const abi = [...predictionMarketAbi, ...predictionMarketLensAbi, ...multicall3TimeAbi];
+  type Component = { name: string; type: string };
+  const componentsOf = (name: string) =>
+    (predictionMarketLensAbi.find((x) => x.type === "function" && x.name === name) as unknown as {
+      outputs: readonly { components: readonly Component[] }[];
+    }).outputs[0]!.components;
+  const zero = (c: Component) =>
+    c.type === "bool" ? false : c.type.startsWith("bytes") ? stringToHex("", { size: 32 }) : c.type === "address"
+      ? "0x0000000000000000000000000000000000000000"
+      : /^uint(8|16|32)$/.test(c.type) ? 0 : 0n;
+  const struct = (name: string, values: Record<string, unknown>) =>
+    Object.fromEntries(componentsOf(name).map((c) => [c.name, c.name in values ? values[c.name] : zero(c)]));
 
   const ethCalls: { to: string }[] = [];
   const client = createPublicClient({
-    chain: makeChain(99801, "http://unused"),
+    chain: makeChain(421614, "http://unused"),
     transport: custom({
       request: async ({ method, params }) => {
         if (method !== "eth_call") throw new Error(`unexpected ${method}`);
@@ -198,16 +199,21 @@ test("a boundary is read with exactly one eth_call to Multicall3 aggregate3", as
             switch (d.functionName) {
               case "getCurrentBlockTimestamp": return BigInt(boundary + 1);
               case "paused": return false;
-              case "bufferSeconds": return 30n;
-              case "priceSource": return SOURCE;
+              case "getParams": return struct("getParams", { bufferSeconds: 30n });
               case "getMarketIds": return markets.map((m) => m.id);
-              case "markets": {
+              case "getMarket": {
                 const m = markets.find((x) => x.id === (d.args as readonly Hex[])[0])!;
-                return [m.assetId, m.interval, true, true, BigInt(boundary - m.interval), 1n, stringToHex("", { size: 32 })];
+                return struct("getMarket", {
+                  assetId: m.assetId,
+                  interval: m.interval,
+                  active: true,
+                  exists: true,
+                  lastBoundary: BigInt(boundary - m.interval),
+                });
               }
               case "getRound": {
                 const id = (d.args as readonly Hex[])[0];
-                return id === lockedRound ? emptyRound(2, SOURCE) : emptyRound(0, "0x0000000000000000000000000000000000000000");
+                return struct("getRound", { status: id === lockedRound ? 2 : 0 });
               }
               default: throw new Error(`unexpected inner call ${d.functionName}`);
             }
@@ -219,11 +225,11 @@ test("a boundary is read with exactly one eth_call to Multicall3 aggregate3", as
     }),
   });
 
-  const snap = await readBoundary(client as never, MARKET, markets, boundary);
+  const snap = await readBoundary(client as never, MARKET, LENS, markets, boundary);
   assert.equal(ethCalls.length, 1, "one eth_call for the whole boundary");
   assert.equal(ethCalls[0]?.to.toLowerCase(), MULTICALL3.toLowerCase());
   assert.equal(snap.chainTime, boundary + 1);
-  assert.equal(snap.priceSource, SOURCE);
+  assert.equal(snap.bufferSeconds, 30);
   assert.equal(snap.marketCount, 3);
   assert.deepEqual(snap.markets.map((m) => m.lastBoundary), [boundary - 300, boundary - 900, boundary - 1800]);
   // Every aligned market contributes its close and lock round: 3 markets x 2 at a 30 minute boundary.

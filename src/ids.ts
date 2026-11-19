@@ -1,10 +1,7 @@
-import { encodeAbiParameters, keccak256, stringToHex, toHex, type Hex } from "viem";
+import { encodeAbiParameters, hexToBytes, keccak256, stringToHex, type Hex } from "viem";
 
-/** Canonical Multicall3, deployed on Elysium testnet and mainnet. */
+/** Canonical Multicall3 (same address on Arbitrum Sepolia and most chains). */
 export const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11" as const;
-
-export const OPERATOR_ROLE = keccak256(toHex("OPERATOR_ROLE"));
-export const PRICE_PUSHER_ROLE = keccak256(toHex("PRICE_PUSHER_ROLE"));
 
 /** keccak256(abi.encode(assetId, uint32 interval)), as PredictionMarket.marketIdOf. */
 export function marketIdOf(assetId: Hex, interval: number): Hex {
@@ -18,4 +15,12 @@ export function roundIdOf(marketId: Hex, start: number | bigint): Hex {
 
 export function assetIdOf(symbol: string): Hex {
   return stringToHex(symbol, { size: 32 });
+}
+
+/** Decode a left aligned bytes32 ticker such as bytes32("BTC") into "BTC". */
+export function assetIdToSymbol(assetId: Hex): string {
+  const bytes = hexToBytes(assetId);
+  let end = bytes.length;
+  while (end > 0 && bytes[end - 1] === 0) end--;
+  return new TextDecoder().decode(bytes.subarray(0, end));
 }

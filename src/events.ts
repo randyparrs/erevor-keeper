@@ -1,14 +1,22 @@
 import { parseEventLogs, type Hex, type Log } from "viem";
 import { predictionMarketAbi } from "./abi.js";
 import { log } from "./log.js";
-import { assetIdToSymbol } from "./prices.js";
+import { assetIdToSymbol } from "./ids.js";
 
 export const SKIP_REASONS = ["UnknownMarket", "OutsideWindow", "AlreadyExecuted", "PriceUnavailable"] as const;
-export const VOID_REASONS = ["MissedLock", "MissedClose", "DisputeVoid", "PriceRejected", "PriceUnavailable"] as const;
+export const VOID_REASONS = [
+  "MissedLock",
+  "MissedClose",
+  "DisputeVoid",
+  "PriceRejected",
+  "PriceUnavailable",
+  "ConfidenceRejected",
+] as const;
 
 export interface ExecutionSummary {
   skipped: { market: Hex; reason: string }[];
   rejected: { asset: string; previous: string; rejected: string; timestamp: number }[];
+  wideConfidence: { asset: string; price: string; conf: string; maxConfBps: number; publishTime: number }[];
   pending: { asset: string; pendingReference: string; count: number }[];
   rebased: { asset: string; oldReference: string; newReference: string; timestamp: number }[];
   voided: { roundId: Hex; reason: string }[];
@@ -24,9 +32,27 @@ export function summarizeLogs(logs: Log[], market: string): ExecutionSummary {
   const events = parseEventLogs({
     abi: predictionMarketAbi,
     logs: logs.filter((l) => l.address.toLowerCase() === market.toLowerCase()),
-    eventName: ["MarketSkipped", "PriceRejected", "RebasePending", "PriceRebased", "RoundVoided", "RoundLocked", "RoundClosed"],
+    eventName: [
+      "MarketSkipped",
+      "PriceRejected",
+      "PriceConfidenceRejected",
+      "RebasePending",
+      "PriceRebased",
+      "RoundVoided",
+      "RoundLocked",
+      "RoundClosed",
+    ],
   });
-  const s: ExecutionSummary = { skipped: [], rejected: [], pending: [], rebased: [], voided: [], locked: 0, closed: 0 };
+  const s: ExecutionSummary = {
+    skipped: [],
+    rejected: [],
+    wideConfidence: [],
+    pending: [],
+    rebased: [],
+    voided: [],
+    locked: 0,
+    closed: 0,
+  };
   for (const e of events) {
     switch (e.eventName) {
       case "MarketSkipped":
@@ -38,6 +64,15 @@ export function summarizeLogs(logs: Log[], market: string): ExecutionSummary {
           previous: e.args.previous.toString(),
           rejected: e.args.rejected.toString(),
           timestamp: Number(e.args.timestamp),
+        });
+        break;
+      case "PriceConfidenceRejected":
+        s.wideConfidence.push({
+          asset: assetIdToSymbol(e.args.assetId),
+          price: e.args.price.toString(),
+          conf: e.args.conf.toString(),
+          maxConfBps: Number(e.args.maxConfBps),
+          publishTime: Number(e.args.publishTime),
         });
         break;
       case "RebasePending":
@@ -73,6 +108,7 @@ export function summarizeLogs(logs: Log[], market: string): ExecutionSummary {
 export function logSummary(s: ExecutionSummary): void {
   for (const x of s.skipped) log("warn", "market skipped", x);
   for (const x of s.rejected) log("warn", "price rejected by circuit breaker", x);
+  for (const x of s.wideConfidence) log("warn", "price rejected: Pyth confidence too wide", x);
   for (const x of s.pending) log("warn", "rebase pending: new price level awaiting confirmation", x);
   for (const x of s.rebased) log("warn", "price rebased: new reference level confirmed", x);
   for (const x of s.voided) log("warn", "round voided", x);

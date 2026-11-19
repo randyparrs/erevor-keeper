@@ -2,6 +2,12 @@ export type Level = "debug" | "info" | "warn" | "error";
 
 const order: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 let minLevel: Level = "info";
+let errors = 0;
+
+/** Error lines written so far (a single CI pass exits non zero when this is not zero). */
+export function errorCount(): number {
+  return errors;
+}
 
 export function setLogLevel(level: Level): void {
   minLevel = level;
@@ -9,6 +15,7 @@ export function setLogLevel(level: Level): void {
 
 /** Structured JSON line logger. One object per line on stdout, ready for journald, Docker or a log shipper. */
 export function log(level: Level, msg: string, fields: Record<string, unknown> = {}): void {
+  if (level === "error") errors++;
   if (order[level] < order[minLevel]) return;
   const line = JSON.stringify({ time: new Date().toISOString(), level, msg, ...fields }, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,

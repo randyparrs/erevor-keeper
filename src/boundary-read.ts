@@ -1,7 +1,8 @@
-// All reads a boundary needs, in a single Multicall3 aggregate3 eth_call.
+// All reads a boundary needs, in a single Multicall3 aggregate3 eth_call (market pause flag, parameters, markets and
+// the rounds to lock or close, read through PredictionMarketLens).
 
 import { parseAbi, type Address, type Hex, type PublicClient } from "viem";
-import { predictionMarketAbi } from "./abi.js";
+import { predictionMarketAbi, predictionMarketLensAbi } from "./abi.js";
 import { MULTICALL3, roundIdOf } from "./ids.js";
 import type { MarketInfo } from "./schedule.js";
 
@@ -17,14 +18,12 @@ export interface StaticMarket {
 
 export interface RoundView {
   status: number;
-  priceSource: Address;
 }
 
 export interface BoundarySnapshot {
   chainTime: number;
   paused: boolean;
   bufferSeconds: number;
-  priceSource: Address;
   marketCount: number;
   markets: MarketInfo[];
   /** Rounds to close (start = boundary - interval) and lock (start = boundary) of aligned markets. */
@@ -38,51 +37,48 @@ interface Call {
   args?: readonly unknown[];
 }
 
-const FIXED_CALLS = 5;
+const FIXED_CALLS = 4;
 
 /** Builds the aggregate3 call list. Round ids are computed locally from the boundary and the interval. */
-export function boundaryCalls(market: Address, markets: StaticMarket[], boundary: number) {
+export function boundaryCalls(market: Address, lens: Address, markets: StaticMarket[], boundary: number) {
   const calls: Call[] = [
     { address: MULTICALL3, abi: multicall3TimeAbi, functionName: "getCurrentBlockTimestamp" },
     { address: market, abi: predictionMarketAbi, functionName: "paused" },
-    { address: market, abi: predictionMarketAbi, functionName: "bufferSeconds" },
-    { address: market, abi: predictionMarketAbi, functionName: "priceSource" },
-    { address: market, abi: predictionMarketAbi, functionName: "getMarketIds" },
+    { address: lens, abi: predictionMarketLensAbi, functionName: "getParams" },
+    { address: lens, abi: predictionMarketLensAbi, functionName: "getMarketIds" },
   ];
-  for (const m of markets) calls.push({ address: market, abi: predictionMarketAbi, functionName: "markets", args: [m.id] });
+  for (const m of markets) calls.push({ address: lens, abi: predictionMarketLensAbi, functionName: "getMarket", args: [m.id] });
   const roundKeys: Hex[] = [];
   for (const m of markets) {
     if (boundary % m.interval !== 0) continue;
     for (const start of [boundary - m.interval, boundary]) {
       const id = roundIdOf(m.id, start);
       roundKeys.push(id);
-      calls.push({ address: market, abi: predictionMarketAbi, functionName: "getRound", args: [id] });
+      calls.push({ address: lens, abi: predictionMarketLensAbi, functionName: "getRound", args: [id] });
     }
   }
   return { calls, roundKeys };
 }
 
-type MarketTuple = readonly [Hex, number, boolean, boolean, bigint, bigint, Hex];
-
 export function parseBoundary(results: readonly unknown[], markets: StaticMarket[], roundKeys: Hex[]): BoundarySnapshot {
-  const marketIds = results[4] as readonly Hex[];
+  const marketIds = results[3] as readonly Hex[];
+  const params = results[2] as { bufferSeconds: bigint };
   const out: BoundarySnapshot = {
     chainTime: Number(results[0] as bigint),
     paused: results[1] as boolean,
-    bufferSeconds: Number(results[2] as bigint),
-    priceSource: results[3] as Address,
+    bufferSeconds: Number(params.bufferSeconds),
     marketCount: marketIds.length,
     markets: [],
     rounds: new Map(),
   };
   markets.forEach((m, i) => {
-    const [, , active, , lastBoundary] = results[FIXED_CALLS + i] as MarketTuple;
-    out.markets.push({ ...m, active, lastBoundary: Number(lastBoundary) });
+    const row = results[FIXED_CALLS + i] as { active: boolean; lastBoundary: bigint };
+    out.markets.push({ ...m, active: row.active, lastBoundary: Number(row.lastBoundary) });
   });
   const roundOffset = FIXED_CALLS + markets.length;
   roundKeys.forEach((id, i) => {
-    const r = results[roundOffset + i] as { status: number; priceSource: Address };
-    out.rounds.set(id, { status: r.status, priceSource: r.priceSource });
+    const r = results[roundOffset + i] as { status: number };
+    out.rounds.set(id, { status: r.status });
   });
   return out;
 }
@@ -91,10 +87,11 @@ export function parseBoundary(results: readonly unknown[], markets: StaticMarket
 export async function readBoundary(
   client: PublicClient,
   market: Address,
+  lens: Address,
   markets: StaticMarket[],
   boundary: number,
 ): Promise<BoundarySnapshot> {
-  const { calls, roundKeys } = boundaryCalls(market, markets, boundary);
+  const { calls, roundKeys } = boundaryCalls(market, lens, markets, boundary);
   const results = await client.multicall({
     contracts: calls as never,
     allowFailure: false,
