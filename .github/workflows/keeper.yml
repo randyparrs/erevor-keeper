@@ -1,13 +1,17 @@
 name: Erevor Keeper
 
-# One keeper pass per 5 minute UTC boundary on Elysium testnet.
+# One keeper pass per 5 minute UTC boundary on Arbitrum Sepolia (chain 421614).
 #
 # Timing: executeBoundary must land within bufferSeconds (30 s) after each boundary and a runner needs 30 to 90 s to
-# start, so the job is triggered about 2 minutes BEFORE each boundary (minutes 3, 8, 13, ...). `--once` waits for the
-# boundary, executes it and exits. A runner that arrives late but inside the window executes immediately.
+# start, so the job is triggered about 2 minutes BEFORE each boundary (minutes 3, 8, 13, ...). `--once` opens the
+# Pyth Hermes stream shortly before the boundary, captures the first update of each asset, executes and exits. A
+# runner that arrives late but inside the window executes immediately.
 #
 # Trigger: an external cron-job.org job calls the workflow_dispatch API at minutes 3,8,...,58. GitHub's own schedule
 # stays as a best effort backup; a late or duplicated run is harmless (the contract skips executed boundaries).
+#
+# A pass that logs any error (MISSED_WITH_BETS, PYTH_KEY_INVALID_OR_EXPIRED, a missed boundary) exits with code 1,
+# so the run fails and GitHub notifies by email.
 #
 # Cost: free and unlimited minutes on a public repository.
 
@@ -18,7 +22,7 @@ on:
 
 # A single group: two passes never run in parallel, a new trigger waits for the running one.
 concurrency:
-  group: erevor-keeper-elysium-testnet
+  group: erevor-keeper-arbitrum-sepolia
   cancel-in-progress: false
 
 jobs:
@@ -49,15 +53,14 @@ jobs:
       - name: Run keeper for the next boundary
         run: node dist/src/index.js --once
         env:
-          RPC_URL: ${{ secrets.RPC_URL }}
+          RPC_URL: https://sepolia-rollup.arbitrum.io/rpc
           KEEPER_PRIVATE_KEY: ${{ secrets.KEEPER_PRIVATE_KEY }}
-          RPC_FALLBACK_URL: https://testnet-rpc.elysium.kinetiq.xyz
-          CHAIN_ID: '99801'
-          MARKET_ADDRESS: '0x64AE6fe468d9494629E95F7257E9541205d21a69'
-          PUSH_PRICES: 'true'
-          HL_INFO_URL: https://api.hyperliquid.xyz/info
-          HL_PRICE_FIELD: oraclePx
-          MIN_BALANCE_HYPE: '0.1'
+          PYTH_API_KEY: ${{ secrets.PYTH_API_KEY }}
+          CHAIN_ID: '421614'
+          MARKET_ADDRESS: '0x0008917F984e12142a48eE3133e2153B30BCBC63'
+          LENS_ADDRESS: '0x6C097F874C815B8Da7EeF1c4B07f1E1D282eDcbA'
+          HERMES_URL: https://hermes.pyth.network
+          MIN_BALANCE: '0.005'
           IDLE_MODE: 'true'
           IDLE_REFRESH_SECONDS: '1800'
           TRIGGER_LEAD_SECONDS: '120'
