@@ -1,0 +1,42 @@
+name: Erevor Guardian Relayer
+
+# Carries guardian verdicts from GenLayer to Arbitrum Sepolia. Every pass: for each round disputed in the last 6.5
+# hours that is still open, request the guardian review on GenLayer (if none is FINALIZED yet), wait for it to
+# finalize and propose the verdict to GuardianReceiver (VALID applies at once, VOID after the 30 minute veto delay,
+# which this pass also executes once due). Errors and disputes close to their timeout without a verdict fail the run,
+# so GitHub notifies. Triggered every 5 minutes by cron-job.org (workflow_dispatch) with GitHub's schedule as backup.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '2-57/5 * * * *'
+
+concurrency:
+  group: erevor-guardian-relayer
+  cancel-in-progress: false
+
+jobs:
+  relayer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci --prefer-offline --no-audit --no-fund
+      - run: npm run build
+      - name: Relay guardian verdicts
+        run: node dist/src/guardian/index.js relayer
+        env:
+          RPC_URL: https://sepolia-rollup.arbitrum.io/rpc
+          CHAIN_ID: '421614'
+          MARKET_ADDRESS: '0x0008917F984e12142a48eE3133e2153B30BCBC63'
+          LENS_ADDRESS: '0x6C097F874C815B8Da7EeF1c4B07f1E1D282eDcbA'
+          RECEIVER_ADDRESS: ${{ vars.GUARDIAN_RECEIVER_ADDRESS }}
+          GUARDIAN_GL_ADDRESS: ${{ vars.GUARDIAN_GL_ADDRESS }}
+          GL_NODE: https://rpc-bradbury.genlayer.com
+          RELAYER_PRIVATE_KEY: ${{ secrets.RELAYER_PRIVATE_KEY }}
+          MAX_WAIT_FINAL_MINUTES: '15'

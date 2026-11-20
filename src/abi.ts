@@ -43,6 +43,38 @@ export const predictionMarketAbi = [
   },
   {
     "type": "function",
+    "name": "bondFor",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "dispute",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "executeBoundary",
     "inputs": [
       {
@@ -110,6 +142,19 @@ export const predictionMarketAbi = [
     "stateMutability": "view"
   },
   {
+    "type": "function",
+    "name": "stakeToken",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IERC20"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
     "type": "event",
     "name": "BoundaryExecuted",
     "inputs": [
@@ -148,6 +193,68 @@ export const predictionMarketAbi = [
         "type": "bool",
         "indexed": false,
         "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DisputeResolved",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "verdict",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "enum PredictionMarket.Verdict"
+      },
+      {
+        "name": "disputer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "bond",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "bounty",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DisputeTimedOut",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "disputer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "bond",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -389,6 +496,37 @@ export const predictionMarketAbi = [
   },
   {
     "type": "event",
+    "name": "RoundDisputed",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "disputer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "bond",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "timeoutAt",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "RoundLocked",
     "inputs": [
       {
@@ -472,7 +610,498 @@ export const predictionMarketAbi = [
   }
 ] as const;
 
+export const guardianReceiverAbi = [
+  {
+    "type": "function",
+    "name": "executeVerdict",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "market",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract PredictionMarket"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pendingVoid",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "executeAfter",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "genlayerTxRef",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "proposeVerdict",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "verdict",
+        "type": "uint8",
+        "internalType": "enum PredictionMarket.Verdict"
+      },
+      {
+        "name": "genlayerTxRef",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "relayer",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "vetoDelay",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "vetoVerdict",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "vetoer",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "event",
+    "name": "VerdictExecuted",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "verdict",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "enum PredictionMarket.Verdict"
+      },
+      {
+        "name": "genlayerTxRef",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "VerdictProposed",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "verdict",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "enum PredictionMarket.Verdict"
+      },
+      {
+        "name": "genlayerTxRef",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "executeAfter",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "VerdictVetoed",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "genlayerTxRef",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "NoPendingVoid",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotDisputed",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotRelayer",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotVetoer",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TooEarly",
+    "inputs": [
+      {
+        "name": "executeAfter",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TooLateForVoid",
+    "inputs": [
+      {
+        "name": "executeAfter",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "timeoutAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "VoidPending",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  }
+] as const;
+
 export const predictionMarketLensAbi = [
+  {
+    "type": "function",
+    "name": "getAsset",
+    "inputs": [
+      {
+        "name": "assetId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "a",
+        "type": "tuple",
+        "internalType": "struct PredictionMarket.Asset",
+        "components": [
+          {
+            "name": "listed",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "maxMoveBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "maxConfBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "lastPriceTimestamp",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "evalBoundary",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "evalRejected",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "pendingCount",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "evalConfirmations",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "refTimestamp",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "lastPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "refPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "pendingPrice",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "priceId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getConfig",
+    "inputs": [
+      {
+        "name": "configHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "c",
+        "type": "tuple",
+        "internalType": "struct PredictionMarket.RoundConfig",
+        "components": [
+          {
+            "name": "priceId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "feeBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "bondBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "maxMoveBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "maxConfBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "rebaseConfirmations",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "maxMoveScaleCap",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "disputesEnabled",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "disputeWindow",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "disputeTimeout",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "bufferSeconds",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxPriceAge",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "minBond",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "disputeBounty",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getDispute",
+    "inputs": [
+      {
+        "name": "roundId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "d",
+        "type": "tuple",
+        "internalType": "struct PredictionMarket.Dispute",
+        "components": [
+          {
+            "name": "disputer",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "disputedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "timeoutAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "bond",
+            "type": "uint128",
+            "internalType": "uint128"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
   {
     "type": "function",
     "name": "getMarket",
