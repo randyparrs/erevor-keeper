@@ -58,3 +58,12 @@ export function streamFeedsFor(snap: BoundarySnapshot, boundary: number, feedIds
   }
   return out;
 }
+
+/**
+ * Markets of a plan that are actually executed: active markets, and inactive markets that still hold a Pending or
+ * Locked round with bets (so those rounds lock and close normally). An inactive market without bets is never executed:
+ * the circuit breaker reference is kept per asset, so executing the active market of the asset refreshes it.
+ */
+export function executableMarkets(markets: MarketInfo[], snap: BoundarySnapshot, boundary: number): MarketInfo[] {
+  return markets.filter((m) => m.active || hasOpenRound(snap, m, boundary));
+}

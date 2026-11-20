@@ -24,7 +24,7 @@ import { logSummary, summarizeLogs } from "./events.js";
 import { captureFirstUpdates, type FirstUpdateCapture, type StreamResult } from "./hermes.js";
 import { assetIdToSymbol, MULTICALL3 } from "./ids.js";
 import { log } from "./log.js";
-import { hasOpenRound, planBoundary, streamFeedsFor, type BoundaryPlan } from "./plan.js";
+import { executableMarkets, hasOpenRound, planBoundary, streamFeedsFor, type BoundaryPlan } from "./plan.js";
 import { RpcProvider, type RpcEvent } from "./rpc.js";
 import { BASE_INTERVAL, backoffMs, chooseOnceTarget, nextBoundary, selectDue, sleep, type MarketInfo } from "./schedule.js";
 
@@ -359,13 +359,11 @@ export class Keeper {
     // Pause only blocks new bets: rounds with bets must still lock and close, so a paused market is executed too.
     if (snap.paused) log("warn", "market is paused: new bets are blocked, rounds with bets still settle", { boundary });
     const planned = planBoundary(snap, boundary, this.cfg.idleMode, this.cfg.idleRefreshSeconds);
-    // Markets whose feed is not in the stream (inactive and without bets) are not refreshed. A market with bets is
-    // always kept: if its feed is missing it is reported below as not executed.
-    const execute = planned.execute.filter(
-      (m) => streamed.includes(this.cfg.feedIds[m.symbol] as Hex) || hasOpenRound(snap, m, boundary),
-    );
+    // Only active markets and markets holding a round with bets are executed. A market with bets whose feed is
+    // missing from the stream is reported below as not executed.
+    const execute = executableMarkets(planned.execute, snap, boundary);
     if (execute.length < planned.execute.length) {
-      log("debug", "inactive markets without bets are not refreshed", { boundary, skipped: planned.execute.length - execute.length });
+      log("debug", "inactive markets without bets are not executed", { boundary, skipped: planned.execute.length - execute.length });
     }
     const plan: BoundaryPlan = { ...planned, execute };
     this.lastPlan = plan;

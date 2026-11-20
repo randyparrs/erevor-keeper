@@ -4,7 +4,7 @@ import type { Hex } from "viem";
 import type { BoundarySnapshot, RoundView } from "../src/boundary-read.js";
 import { parseRefresh } from "../src/config.js";
 import { assetIdOf, marketIdOf, roundIdOf } from "../src/ids.js";
-import { planBoundary, streamFeedsFor } from "../src/plan.js";
+import { executableMarkets, planBoundary, streamFeedsFor } from "../src/plan.js";
 import { DEFAULT_FEED_IDS } from "../src/config.js";
 import type { MarketInfo } from "../src/schedule.js";
 
@@ -92,4 +92,26 @@ test("an inactive market that still holds a round with bets keeps its feed in th
 test("a refresh boundary streams the active assets only, once per asset", () => {
   const snap = snapshotWith([btc5, eth5, btc30, sol5, hype5]);
   assert.deepEqual(streamFeedsFor(snap, T0, DEFAULT_FEED_IDS), [DEFAULT_FEED_IDS.BTC, DEFAULT_FEED_IDS.ETH]);
+});
+
+test("a refresh executes active markets only: inactive 15 and 30 minute markets without bets are left out", () => {
+  const btc15 = { ...market("BTC", 900), active: false };
+  const btc30i = { ...market("BTC", 1800), active: false };
+  const eth30i = { ...market("ETH", 1800), active: false };
+  const snap = snapshotWith([btc5, eth5, btc15, btc30i, eth30i]);
+  const plan = planBoundary(snap, T0, true, 1800);
+  assert.equal(plan.mode, "refresh");
+  assert.equal(plan.execute.length, 5);
+  assert.deepEqual(executableMarkets(plan.execute, snap, T0).map((m) => `${m.symbol}${m.interval}`), ["BTC300", "ETH300"]);
+});
+
+test("an inactive market that still holds a round with bets is executed so the round locks or closes", () => {
+  const btc15 = { ...market("BTC", 900), active: false };
+  const b = T0 + 900;
+  const snap = snapshotWith([btc5, btc15], [[roundIdOf(btc15.id, b - 900), 2]]);
+  // Idle mode: only the market with bets; idle mode off: every due market except inactive ones without bets.
+  const idle = planBoundary(snap, b, true, 1800);
+  assert.deepEqual(executableMarkets(idle.execute, snap, b).map((m) => `${m.symbol}${m.interval}`), ["BTC900"]);
+  const all = planBoundary(snap, b, false, 1800);
+  assert.deepEqual(executableMarkets(all.execute, snap, b).map((m) => `${m.symbol}${m.interval}`), ["BTC300", "BTC900"]);
 });
