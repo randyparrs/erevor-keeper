@@ -42,3 +42,19 @@ export function planBoundary(snap: BoundarySnapshot, boundary: number, idleMode:
   if (withBets.length > 0) return { ...base, mode: "active", execute: withBets };
   return { ...base, mode: "idle", execute: [] };
 }
+
+/**
+ * Pyth feeds the Hermes stream must carry for `boundary`, decided before the boundary from a snapshot taken a few
+ * seconds earlier: the assets of due markets that hold a round with bets, plus the assets of due active markets (they
+ * can still receive a bet until the boundary, and they are the markets refreshed when idle). Inactive markets without
+ * bets are left out, so the signed update carries fewer feeds and every per asset Pyth call is cheaper.
+ */
+export function streamFeedsFor(snap: BoundarySnapshot, boundary: number, feedIds: Record<string, `0x${string}`>): `0x${string}`[] {
+  const out: `0x${string}`[] = [];
+  for (const m of selectDue(snap.markets, boundary)) {
+    if (!m.active && !hasOpenRound(snap, m, boundary)) continue;
+    const feed = feedIds[m.symbol];
+    if (feed && !out.includes(feed)) out.push(feed);
+  }
+  return out;
+}

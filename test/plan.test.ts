@@ -4,7 +4,8 @@ import type { Hex } from "viem";
 import type { BoundarySnapshot, RoundView } from "../src/boundary-read.js";
 import { parseRefresh } from "../src/config.js";
 import { assetIdOf, marketIdOf, roundIdOf } from "../src/ids.js";
-import { planBoundary } from "../src/plan.js";
+import { planBoundary, streamFeedsFor } from "../src/plan.js";
+import { DEFAULT_FEED_IDS } from "../src/config.js";
 import type { MarketInfo } from "../src/schedule.js";
 
 const T0 = 1_800_000_000; // aligned to 300, 900 and 1800
@@ -67,4 +68,28 @@ test("refresh interval must be a positive multiple of 300", () => {
   assert.equal(parseRefresh("1800"), 1800);
   assert.throws(() => parseRefresh("1000"));
   assert.throws(() => parseRefresh("0"));
+});
+
+const sol5 = { ...market("SOL", 300), active: false };
+const hype5 = { ...market("HYPE", 300), active: false };
+
+function snapshotWith(markets: MarketInfo[], rounds: [Hex, number][] = []): BoundarySnapshot {
+  return { ...snapshot(rounds), marketCount: markets.length, markets };
+}
+
+test("the stream carries only the feeds of active due markets and of markets with bets", () => {
+  const b = T0 + 300; // 5 minute boundary: only the 300 s markets are due
+  const snap = snapshotWith([btc5, eth5, btc30, sol5, hype5]);
+  assert.deepEqual(streamFeedsFor(snap, b, DEFAULT_FEED_IDS), [DEFAULT_FEED_IDS.BTC, DEFAULT_FEED_IDS.ETH]);
+});
+
+test("an inactive market that still holds a round with bets keeps its feed in the stream", () => {
+  const b = T0 + 300;
+  const snap = snapshotWith([btc5, sol5, hype5], [[roundIdOf(sol5.id, b - 300), 2]]);
+  assert.deepEqual(streamFeedsFor(snap, b, DEFAULT_FEED_IDS), [DEFAULT_FEED_IDS.BTC, DEFAULT_FEED_IDS.SOL]);
+});
+
+test("a refresh boundary streams the active assets only, once per asset", () => {
+  const snap = snapshotWith([btc5, eth5, btc30, sol5, hype5]);
+  assert.deepEqual(streamFeedsFor(snap, T0, DEFAULT_FEED_IDS), [DEFAULT_FEED_IDS.BTC, DEFAULT_FEED_IDS.ETH]);
 });

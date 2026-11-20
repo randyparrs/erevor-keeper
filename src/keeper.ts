@@ -24,7 +24,7 @@ import { logSummary, summarizeLogs } from "./events.js";
 import { captureFirstUpdates, type FirstUpdateCapture, type StreamResult } from "./hermes.js";
 import { assetIdToSymbol, MULTICALL3 } from "./ids.js";
 import { log } from "./log.js";
-import { hasOpenRound, planBoundary, type BoundaryPlan } from "./plan.js";
+import { hasOpenRound, planBoundary, streamFeedsFor, type BoundaryPlan } from "./plan.js";
 import { RpcProvider, type RpcEvent } from "./rpc.js";
 import { BASE_INTERVAL, backoffMs, chooseOnceTarget, nextBoundary, selectDue, sleep, type MarketInfo } from "./schedule.js";
 
@@ -263,7 +263,7 @@ export class Keeper {
     const streamStop = new AbortController();
     const onStop = () => streamStop.abort();
     this.stop.signal.addEventListener("abort", onStop, { once: true });
-    const feeds = [...new Set(this.staticMarkets.map((m) => this.cfg.feedIds[m.symbol] as Hex))];
+    const feeds = await this.feedsToStream(boundary);
     const capturing = captureFirstUpdates({
       hermesUrl: this.cfg.hermesUrl,
       apiKey: this.cfg.pythApiKey,
@@ -285,7 +285,7 @@ export class Keeper {
       for (let attempt = 1; ; attempt++) {
         const started = Date.now();
         try {
-          const ok = await this.attemptBoundary(boundary, deadlineMs, attempt, capturing, streamStop);
+          const ok = await this.attemptBoundary(boundary, deadlineMs, attempt, capturing, streamStop, feeds);
           if (ok) {
             this.cleanBoundaries = attempt === 1 ? this.cleanBoundaries + 1 : 0;
             const plan = this.lastPlan;
@@ -344,6 +344,7 @@ export class Keeper {
     attempt: number,
     capturing: ReturnType<typeof captureFirstUpdates>,
     streamStop: AbortController,
+    streamed: Hex[],
   ): Promise<boolean> {
     this.lastPlan = undefined;
     this.lastInclusionDelay = undefined;
@@ -357,7 +358,16 @@ export class Keeper {
 
     // Pause only blocks new bets: rounds with bets must still lock and close, so a paused market is executed too.
     if (snap.paused) log("warn", "market is paused: new bets are blocked, rounds with bets still settle", { boundary });
-    const plan = planBoundary(snap, boundary, this.cfg.idleMode, this.cfg.idleRefreshSeconds);
+    const planned = planBoundary(snap, boundary, this.cfg.idleMode, this.cfg.idleRefreshSeconds);
+    // Markets whose feed is not in the stream (inactive and without bets) are not refreshed. A market with bets is
+    // always kept: if its feed is missing it is reported below as not executed.
+    const execute = planned.execute.filter(
+      (m) => streamed.includes(this.cfg.feedIds[m.symbol] as Hex) || hasOpenRound(snap, m, boundary),
+    );
+    if (execute.length < planned.execute.length) {
+      log("debug", "inactive markets without bets are not refreshed", { boundary, skipped: planned.execute.length - execute.length });
+    }
+    const plan: BoundaryPlan = { ...planned, execute };
     this.lastPlan = plan;
     if (plan.execute.length === 0) {
       streamStop.abort();
@@ -461,6 +471,22 @@ export class Keeper {
     const unavailable = summary.skipped.filter((s) => s.reason === "PriceUnavailable");
     if (unavailable.length > 0) log("warn", "markets skipped for PriceUnavailable", { boundary, markets: unavailable.map((s) => s.market) });
     return true;
+  }
+
+  /**
+   * Feeds to subscribe for `boundary`, from a snapshot read a few seconds before it (see streamFeedsFor). If that read
+   * fails, every listed feed is streamed so nothing can be missed.
+   */
+  private async feedsToStream(boundary: number): Promise<Hex[]> {
+    try {
+      const pre = await readBoundary(this.publicClient, this.market, this.lens, this.staticMarkets, boundary);
+      const feeds = streamFeedsFor(pre, boundary, this.cfg.feedIds);
+      log("debug", "hermes stream feeds", { boundary, feeds: feeds.length });
+      return feeds;
+    } catch (err) {
+      log("warn", "pre boundary read failed, streaming every listed feed", { boundary, ...describeError(err) });
+      return [...new Set(this.staticMarkets.map((m) => this.cfg.feedIds[m.symbol] as Hex))];
+    }
   }
 
   /** Single aggregate3 read; repeats only while the chain clock has not reached the boundary yet. */
