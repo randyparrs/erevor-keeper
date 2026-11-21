@@ -1,21 +1,27 @@
 // erevor-vetoer: Cloudflare Worker that holds GuardianReceiver's vetoer key, apart from the relayer (GitHub Actions).
-// A Cron Trigger runs the veto pass every minute: each VOID proposed to GuardianReceiver in the last LOOKBACK_MINUTES
-// plus the veto delay that is still pending is checked against the review stored on GenLayer, and vetoed unless a
-// FINALIZED VOID review with exactly the recorded prices backs it. GET /health answers 503 when passes stop, fail or
+// A Cron Trigger runs the veto pass every minute. Without eth_getLogs: the round ids of every market closed in the last
+// LOOKBACK_MINUTES (6.5 hours, longer than any dispute stays open) are computed locally, read with Multicall3 at the
+// latest block, and for the disputed ones GuardianReceiver.pendingVoid is read the same way. Each pending VOID is
+// checked against the review stored on GenLayer and vetoed unless a FINALIZED VOID review with exactly the recorded
+// prices backs it. GET /health answers 503 when passes stop, fail or
 // a veto happened in the last hour, for an external monitor.
 //
 // Secrets (wrangler secret put): VETOER_PRIVATE_KEY, ARB_RPC_URL, GL_NODE. Addresses are vars in wrangler.toml.
 // KV namespace HEALTH keeps the last pass state (written at most every 5 minutes unless something changes).
-import { createPublicClient, createWalletClient, http, isAddress } from "viem";
+import { createPublicClient, createWalletClient, encodeAbiParameters, http, isAddress, keccak256 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { arbitrumSepolia } from "viem/chains";
 import { createClient } from "genlayer-js";
 import { testnetBradbury } from "genlayer-js/chains";
 import { lensAbi, receiverAbi } from "./abi.js";
-import { assetSymbol, health, vetoPass } from "./core.js";
+import { STATUS_DISPUTED, STATUS_NONE, assetSymbol, candidateStarts, health, vetoPass } from "./core.js";
 
 const STATE_KEY = "state";
 const WRITE_EVERY_SECONDS = 300;
+/** Calldata bytes per Multicall3 call: about 160 round reads, few subrequests per pass. */
+const MULTICALL_BATCH_BYTES = 32_768;
+
+export const roundIdOf = (marketId, start) => keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "uint64" }], [marketId, BigInt(start)]));
 
 const log = (level, msg, fields = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), level, msg, ...fields }));
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -41,7 +47,8 @@ export function makeChain(env) {
   const transport = http(env.ARB_RPC_URL);
   const pub = createPublicClient({ chain: arbitrumSepolia, transport });
   const wallet = createWalletClient({ chain: arbitrumSepolia, transport, account });
-  const lookbackMinutes = Number(env.LOOKBACK_MINUTES || "30");
+  const lookbackMinutes = Number(env.LOOKBACK_MINUTES || "390");
+  const multicall = (contracts) => (contracts.length ? pub.multicall({ contracts, allowFailure: false, batchSize: MULTICALL_BATCH_BYTES }) : Promise.resolve([]));
 
   return {
     account,
@@ -52,18 +59,15 @@ export function makeChain(env) {
       if (onChain.toLowerCase() !== account.address.toLowerCase()) throw new Error(`GuardianReceiver vetoer is ${onChain}, not this key`);
     },
     async voidProposals() {
-      const delay = await pub.readContract({ address: receiver, abi: receiverAbi, functionName: "vetoDelay" });
-      const seconds = BigInt(Number(delay) + lookbackMinutes * 60);
-      const latest = await pub.getBlock();
-      // Arbitrum block times vary: measure them over the last 20,000 blocks to size the window.
-      const probe = latest.number > 20_000n ? latest.number - 20_000n : 0n;
-      const old = await pub.getBlock({ blockNumber: probe });
-      const perBlock = Math.max(0.05, Number(latest.timestamp - old.timestamp) / Number(latest.number - probe || 1n));
-      const span = BigInt(Math.ceil(Number(seconds) / perBlock)) + 1_000n;
-      const fromBlock = latest.number > span ? latest.number - span : 0n;
-      const event = receiverAbi.find((x) => x.type === "event" && x.name === "VerdictProposed");
-      const logs = await pub.getLogs({ address: receiver, event, fromBlock, toBlock: latest.number });
-      return logs.filter((l) => Number(l.args.verdict) === 1).map((l) => ({ roundId: l.args.roundId, genlayerTxRef: l.args.genlayerTxRef }));
+      const block = await pub.getBlock();
+      const ids = await pub.readContract({ address: lens, abi: lensAbi, functionName: "getMarketIds" });
+      const ms = await multicall(ids.map((id) => ({ address: lens, abi: lensAbi, functionName: "getMarket", args: [id] })));
+      const markets = ids.map((marketId, i) => ({ marketId, interval: ms[i].interval })).filter((_, i) => ms[i].exists);
+      const roundIds = candidateStarts(markets, Number(block.timestamp), lookbackMinutes * 60).map((c) => roundIdOf(c.marketId, c.start));
+      const rounds = await multicall(roundIds.map((id) => ({ address: lens, abi: lensAbi, functionName: "getRound", args: [id] })));
+      const disputed = roundIds.filter((_, i) => rounds[i].status !== STATUS_NONE && Number(rounds[i].status) === STATUS_DISPUTED);
+      const pending = await multicall(disputed.map((id) => ({ address: receiver, abi: receiverAbi, functionName: "pendingVoid", args: [id] })));
+      return disputed.map((roundId, i) => ({ roundId, executeAfter: BigInt(pending[i][0]), genlayerTxRef: pending[i][1] })).filter((p) => p.executeAfter !== 0n);
     },
     async pendingVoid(roundId) {
       const [executeAfter] = await pub.readContract({ address: receiver, abi: receiverAbi, functionName: "pendingVoid", args: [roundId] });

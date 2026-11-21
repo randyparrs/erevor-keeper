@@ -1,8 +1,8 @@
 name: Erevor Guardian RPC Check
 
 # Manual check of the guardian RPCs, each on its own: the public Arbitrum Sepolia RPC (primary) and the
-# GUARDIAN_RPC_FALLBACK_URL secret (fallback). It runs the calls the relayer and the vigilante make (chain id, latest
-# block, eth_getLogs over the relayer's 6.5 hour window) and logs which endpoint passed, never the URLs.
+# GUARDIAN_RPC_FALLBACK_URL secret (fallback). It runs the reads of a relayer pass (chain id, latest block, Multicall3
+# eth_calls at the latest block over the 6.5 hour window) and logs which endpoint passed, never the URLs.
 
 on:
   workflow_dispatch:

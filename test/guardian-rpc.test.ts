@@ -58,28 +58,42 @@ test("URLs never reach a log line", () => {
   assert.ok(!out.includes("other.example"));
 });
 
-test("rpc-check finds the largest eth_getLogs range an endpoint accepts and checks the chain id", async () => {
-  const handler: Handler = (_url, method, params) => {
+const TARGETS = { chainId: 421614, lens: "0x6C097F874C815B8Da7EeF1c4B07f1E1D282eDcbA", receiver: "0xb2b8E4C75683444B9B97FE1f5375dABFCeE0bb0E" } as const;
+
+test("rpc-check passes an endpoint that serves the chain id, the latest block and the multicall reads", async () => {
+  const handler: Handler = (_url, method) => {
     if (method === "eth_chainId") return { result: "0x66eee" };
     if (method === "eth_blockNumber") return { result: "0x1000000" };
-    if (method === "eth_getLogs") {
-      const range = BigInt(params[0].toBlock) - BigInt(params[0].fromBlock) + 1n;
-      return range > 10_000n ? { error: { code: -32602, message: "block range too large" } } : { result: [] };
-    }
     return { error: { code: -32601, message: "unexpected" } };
   };
-  const ok = await checkEndpoint("fallback", FALLBACK, 421614, MARKET, 390, fakeFetch(handler));
+  let readsRan = false;
+  const ok = await checkEndpoint("fallback", FALLBACK, TARGETS, 390, fakeFetch(handler), async () => {
+    readsRan = true;
+    return { markets: 15, roundsRead: 585 };
+  });
   assert.equal(ok.ok, true);
-  assert.ok(BigInt(ok.logsChunkBlocks!) <= 10_000n);
+  assert.ok(readsRan);
+  assert.equal(ok.roundsRead, 585);
 
-  const wrongChain = await checkEndpoint("fallback", FALLBACK, 1, MARKET, 390, fakeFetch(handler));
+  const wrongChain = await checkEndpoint("fallback", FALLBACK, { ...TARGETS, chainId: 1 }, 390, fakeFetch(handler), async () => ({ markets: 0, roundsRead: 0 }));
   assert.equal(wrongChain.ok, false);
   assert.match(wrongChain.error!, /chain id 421614, expected 1/);
 });
 
 test("rpc-check reports the underlying HTTP failure, not viem's generic wrapper, and no URL", async () => {
-  const r = await checkEndpoint("fallback", FALLBACK, 421614, MARKET, 390, (async () => new Response("unauthorized", { status: 401 })) as unknown as typeof fetch);
+  const r = await checkEndpoint("fallback", FALLBACK, TARGETS, 390, (async () => new Response("unauthorized", { status: 401 })) as unknown as typeof fetch);
   assert.equal(r.ok, false);
   assert.match(r.error!, /HTTP 401/);
   assert.ok(!r.error!.includes("secret-api-key"));
+});
+
+test("a refused read (an archive only plan) fails the check with the provider's reason", async () => {
+  const handler: Handler = (_url, method) => {
+    if (method === "eth_chainId") return { result: "0x66eee" };
+    if (method === "eth_blockNumber") return { result: "0x1000000" };
+    return { error: { code: -32000, message: "Archive, Debug and Trace requests are not available on your current plan" } };
+  };
+  const r = await checkEndpoint("fallback", FALLBACK, TARGETS, 390, fakeFetch(handler));
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /not available on your current plan/);
 });

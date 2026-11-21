@@ -3,10 +3,12 @@
 Cloudflare Worker that holds `GuardianReceiver`'s vetoer key. It runs apart from the relayer (GitHub Actions), with
 its own secrets and RPCs, so one compromised platform cannot both propose a VOID and let it through.
 
-Every minute (Cron Trigger) it reads the `VerdictProposed` events with verdict VOID from the last `LOOKBACK_MINUTES`
-plus the veto delay. For each one still pending it reads the round from the lens and the review stored by the
-erevor-guardian contract on GenLayer (`get_review`, latest FINALIZED state), and calls `vetoVerdict` unless the review
-is VOID and has exactly the recorded asset, timestamps, prices and outcome. Every decision is one JSON log line.
+Every minute (Cron Trigger), without `eth_getLogs`, it computes the round ids of every market closed in the last
+`LOOKBACK_MINUTES` (390, longer than any dispute stays open), reads them with Multicall3 at the latest block, and for
+the disputed ones reads `GuardianReceiver.pendingVoid`. For each pending VOID it reads the review stored by the
+erevor-guardian contract on GenLayer (`get_review`, latest FINALIZED state) and calls `vetoVerdict` unless the review
+is VOID and has exactly the recorded asset, timestamps, prices and outcome. A pass takes about 5 HTTP requests. Every
+decision is one JSON log line.
 
 `GET /health` returns 200 while passes run without errors, and 503 when the last pass is more than 10 minutes old, the
 last pass failed, or a veto happened in the last hour. Point an external monitor at it (cron-job.org, every 5

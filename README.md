@@ -56,10 +56,15 @@ with GitHub's schedule as a backup:
 | `GUARDIAN_RECEIVER_ADDRESS` (variable) | `GuardianReceiver` on Arbitrum Sepolia. |
 | `GUARDIAN_GL_ADDRESS` (variable) | erevor-guardian on GenLayer Bradbury. |
 
+No `eth_getLogs`: the roles compute the round ids of every market locally (`roundId = keccak256(abi.encode(marketId,
+start))`, starts aligned to the interval) for the rounds closed in their window (vigilante 10 minutes, relayer 6.5
+hours) and read them with Multicall3 at the latest block: `getRound` on the lens, then `getConfig` (vigilante) or
+`GuardianReceiver.pendingVoid` for the disputed ones (relayer). Only state reads, which any RPC plan serves.
+
 RPC: the public Arbitrum Sepolia RPC is the primary. Each call is retried twice with backoff (`rpc retry`), then sent
-to the fallback (`rpc fallback used`, a warning with the method and the reason), then fails the pass with code 1.
-`eth_getLogs` ranges are halved when a provider refuses them. `guardian-rpc-check.yml` (manual) checks both endpoints
-on their own and logs which one passed, never the URLs.
+to the fallback, Chainstack (`rpc fallback used`, a warning with the method and the reason), then fails the pass with
+code 1. `guardian-rpc-check.yml` (manual) runs the reads of a relayer pass on each endpoint on its own and logs which
+one passed, never the URLs.
 
 Each pass logs one summary line (`relayer pass`, `vigilante pass`) and fails on any error line, such as
 `REVIEW_NOT_FINAL` or a dispute close to its timeout without a verdict. Locally the roles read `.env.guardian`.
@@ -68,10 +73,11 @@ Each pass logs one summary line (`relayer pass`, `vigilante pass`) and fails on 
 
 `GuardianReceiver`'s vetoer does not run on GitHub: it is the `erevor-vetoer` Cloudflare Worker in `vetoer/`, with its
 own secrets (`VETOER_PRIVATE_KEY`, `ARB_RPC_URL`, `GL_NODE`), so an account compromise on one platform cannot both
-propose and let through a VOID. A Cron Trigger runs it every minute: every VOID proposed in the last 30 minutes plus
-the veto delay that is still pending is checked against the review stored on GenLayer (`get_review`, latest
-FINALIZED state) and vetoed unless a VOID review with exactly the recorded asset, timestamps, prices and outcome backs
-it. Each decision is logged (Workers Logs). `GET /health` answers 503 when passes stop for 10 minutes, a pass fails,
+propose and let through a VOID. A Cron Trigger runs it every minute: it finds the disputed rounds of the last 6.5
+hours and their pending VOIDs the same way, with Multicall3 and no logs, checks each pending VOID against the review
+stored on GenLayer (`get_review`, latest FINALIZED state) and vetoes it unless a VOID review with exactly the recorded
+asset, timestamps, prices and outcome backs it. Its RPC is PublicNode, a provider the relayer and the vigilante never
+use. Each decision is logged (Workers Logs). `GET /health` answers 503 when passes stop for 10 minutes, a pass fails,
 or a veto happened in the last hour; an external monitor (cron-job.org with failure notifications) checks it.
 
 ```bash

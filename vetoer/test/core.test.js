@@ -90,3 +90,12 @@ test("health is 503 when passes stop, fail or a veto happened in the last hour",
   assert.equal(health({ lastPassAt: now - 60, lastVetoAt: now - 600 }, now).ok, false);
   assert.equal(health({ lastPassAt: now - 60, lastVetoAt: now - 7200 }, now).ok, true);
 });
+
+test("rounds of the veto window are computed from the markets, aligned to each interval", async () => {
+  const { candidateStarts } = await import("../src/core.js");
+  const now = 1795280000;
+  const c = candidateStarts([{ marketId: "0x01", interval: 300 }, { marketId: "0x02", interval: 1800 }], now, 390 * 60);
+  assert.equal(c.filter((x) => x.marketId === "0x01").length, 78);
+  assert.equal(c.filter((x) => x.marketId === "0x02").length, 13);
+  assert.ok(c.every((x) => x.start % 300 === 0 && x.start + 300 <= now));
+});

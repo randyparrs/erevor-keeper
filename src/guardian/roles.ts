@@ -25,9 +25,10 @@ import { logRpcEvent, makeChain } from "../keeper.js";
 import { RpcProvider } from "../rpc.js";
 import { GuardianGL, type ReviewRecord } from "./genlayer.js";
 import { TOLERANCE_BPS, decide, direction, fetchPrices, type Outcome } from "./rule.js";
+import { STATUS_DISPUTED, STATUS_NONE, candidateRounds, closesToCheck, planRelayer, type MarketRef, type PendingVoidView } from "./scan.js";
 
-const STATUS_CLOSED = 3;
-const STATUS_DISPUTED = 4;
+/** Bytes of calldata per Multicall3 call: about 100 round reads, well under any eth_call gas cap. */
+const MULTICALL_BATCH_BYTES = 8_192;
 const VERDICT_VALID = 0;
 const VERDICT_VOID = 1;
 const PRICE_DECIMALS = 18;
@@ -134,26 +135,34 @@ class Base {
     return assetIdToSymbol(m.assetId);
   }
 
-  /** Logs of `event` from `address` over the last `minutes`, in chunks (Arbitrum blocks are about 0.25 s). */
-  async recentLogs(address: Address, abi: readonly unknown[], eventName: string, minutes: number) {
-    const latest = await this.pub.getBlockNumber();
-    const span = BigInt(Math.ceil((minutes * 60) / 0.2));
-    const from = latest > span ? latest - span : 0n;
-    const event = (abi as any[]).find((x) => x.type === "event" && x.name === eventName);
-    const out: any[] = [];
-    // Providers cap the block range of eth_getLogs differently: halve the chunk on a refused range.
-    let chunk = 200_000n;
-    for (let start = from; start <= latest; ) {
-      const end = start + chunk - 1n > latest ? latest : start + chunk - 1n;
-      try {
-        out.push(...(await this.pub.getLogs({ address, event, fromBlock: start, toBlock: end } as any)));
-        start = end + 1n;
-      } catch (err) {
-        if (chunk <= 1_000n) throw err;
-        chunk /= 2n;
-      }
-    }
-    return out;
+  /** Timestamp of the latest block: the chain clock, not the runner's. */
+  async chainNow(): Promise<number> {
+    return Number((await this.pub.getBlock()).timestamp);
+  }
+
+  private async multicall(contracts: any[]): Promise<any[]> {
+    if (contracts.length === 0) return [];
+    return this.pub.multicall({ contracts, allowFailure: false, batchSize: MULTICALL_BATCH_BYTES } as any) as Promise<any[]>;
+  }
+
+  /** Every market of the lens (inactive ones too: their recent rounds can still be disputed). */
+  async markets(): Promise<MarketRef[]> {
+    const ids = (await this.pub.readContract({ address: this.cfg.lens, abi: predictionMarketLensAbi, functionName: "getMarketIds" })) as Hex[];
+    const ms = await this.multicall(ids.map((id) => ({ address: this.cfg.lens, abi: predictionMarketLensAbi, functionName: "getMarket", args: [id] })));
+    return ids.map((marketId, i) => ({ marketId, interval: Number(ms[i].interval), exists: ms[i].exists })).filter((m) => m.exists);
+  }
+
+  /** Rounds that closed in the last `minutes` (by computed round id), read with Multicall3; rounds never opened are skipped. */
+  async roundsClosedWithin(minutes: number, now: number): Promise<{ roundId: Hex; round: RoundView }[]> {
+    const cands = candidateRounds(await this.markets(), now, minutes * 60);
+    const rs = await this.multicall(cands.map((c) => ({ address: this.cfg.lens, abi: predictionMarketLensAbi, functionName: "getRound", args: [c.roundId] })));
+    return cands.map((c, i) => ({ roundId: c.roundId, round: rs[i] as RoundView })).filter((x) => x.round.status !== STATUS_NONE);
+  }
+
+  /** GuardianReceiver.pendingVoid of each round, keyed by lower case round id. */
+  async pendingVoids(roundIds: Hex[]): Promise<Map<string, PendingVoidView>> {
+    const ps = await this.multicall(roundIds.map((id) => ({ address: this.cfg.receiver, abi: guardianReceiverAbi, functionName: "pendingVoid", args: [id] })));
+    return new Map(roundIds.map((id, i) => [id.toLowerCase(), { executeAfter: BigInt(ps[i][0]), genlayerTxRef: ps[i][1] as Hex }]));
   }
 
   async send(key: Hex, address: Address, abi: readonly unknown[], functionName: string, args: readonly unknown[]) {
@@ -176,30 +185,31 @@ export class Relayer extends Base {
   async run(): Promise<void> {
     const me = privateKeyToAccount(this.key).address;
     const gl = new GuardianGL(this.cfg.guardianGL, me, this.key, this.cfg.glNode);
-    const disputes = await this.recentLogs(this.cfg.market, predictionMarketAbi, "RoundDisputed", this.cfg.lookbackMinutes);
-    const ids = [...new Set(disputes.map((l) => l.args.roundId as Hex))];
-    log("info", "relayer pass", { relayer: me, disputesSeen: ids.length });
-    for (const roundId of ids) {
+    const now = await this.chainNow();
+    const rounds = await this.roundsClosedWithin(this.cfg.lookbackMinutes, now);
+    const disputed = rounds.filter((x) => x.round.status === STATUS_DISPUTED);
+    const plan = planRelayer(disputed, await this.pendingVoids(disputed.map((x) => x.roundId)), now);
+    log("info", "relayer pass", { relayer: me, roundsRead: rounds.length, disputed: disputed.length, toReview: plan.review.length, voidsDue: plan.execute.length, voidsWaiting: plan.waiting.length });
+    for (const x of plan.execute) {
       try {
-        await this.handle(roundId, gl);
+        const tx = await this.send(this.key, this.cfg.receiver, guardianReceiverAbi, "executeVerdict", [x.roundId]);
+        log("warn", "VOID executed after the veto delay", { roundId: x.roundId, genlayerTxRef: x.pending.genlayerTxRef, tx });
       } catch (err) {
-        log("error", "relayer failed on a dispute", { roundId, error: err instanceof Error ? err.message : String(err) });
+        log("error", "relayer failed to execute a VOID", { roundId: x.roundId, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    for (const x of plan.review) {
+      try {
+        await this.handle(x.roundId, x.round, gl, now);
+      } catch (err) {
+        log("error", "relayer failed on a dispute", { roundId: x.roundId, error: err instanceof Error ? err.message : String(err) });
       }
     }
   }
 
-  private async handle(roundId: Hex, gl: GuardianGL): Promise<void> {
-    const r = await this.round(roundId);
-    if (r.status !== STATUS_DISPUTED) return;
-    const [executeAfter] = (await this.pub.readContract({ address: this.cfg.receiver, abi: guardianReceiverAbi, functionName: "pendingVoid", args: [roundId] })) as readonly [bigint, Hex];
-    const now = BigInt(Math.floor(Date.now() / 1000));
-    if (executeAfter !== 0n) {
-      if (now >= executeAfter) {
-        const tx = await this.send(this.key, this.cfg.receiver, guardianReceiverAbi, "executeVerdict", [roundId]);
-        log("warn", "VOID executed after the veto delay", { roundId, tx });
-      }
-      return;
-    }
+  /** A disputed round with no VOID pending: review on GenLayer if needed, then propose the FINALIZED verdict. */
+  private async handle(roundId: Hex, r: RoundView, gl: GuardianGL, nowSeconds: number): Promise<void> {
+    const now = BigInt(nowSeconds);
     const asset = await this.assetOf(r);
     let review = await gl.finalReview(roundId);
     let ref: Hex | undefined;
@@ -246,15 +256,16 @@ export class Vigilante extends Base {
 
   /** Disputes a just closed round when the guardian rule, applied to the exchange data, says VOID. */
   private async watchCloses(): Promise<number> {
-    const closes = await this.recentLogs(this.cfg.market, predictionMarketAbi, "RoundClosed", this.cfg.lookbackMinutes);
-    const now = BigInt(Math.floor(Date.now() / 1000));
-    for (const l of closes) {
-      const roundId = l.args.roundId as Hex;
+    const now = await this.chainNow();
+    const rounds = await this.roundsClosedWithin(this.cfg.lookbackMinutes, now);
+    const configs = new Map<string, boolean>();
+    for (const { roundId, round: r } of closesToCheck(rounds, now)) {
       try {
-        const r = await this.round(roundId);
-        if (r.status !== STATUS_CLOSED || now >= r.claimableAt || r.upAmount === 0n || r.downAmount === 0n) continue;
-        const cfg = (await this.pub.readContract({ address: this.cfg.lens, abi: predictionMarketLensAbi, functionName: "getConfig", args: [r.configHash] })) as { disputesEnabled: boolean };
-        if (!cfg.disputesEnabled) continue;
+        if (!configs.has(r.configHash)) {
+          const c = (await this.pub.readContract({ address: this.cfg.lens, abi: predictionMarketLensAbi, functionName: "getConfig", args: [r.configHash] })) as { disputesEnabled: boolean };
+          configs.set(r.configHash, c.disputesEnabled);
+        }
+        if (!configs.get(r.configHash)) continue;
         const asset = await this.assetOf(r);
         const tol = TOLERANCE_BPS[asset];
         if (tol === undefined) continue;
@@ -274,7 +285,7 @@ export class Vigilante extends Base {
         log("error", "vigilante failed on a close", { roundId, error: err instanceof Error ? err.message : String(err) });
       }
     }
-    return closes.length;
+    return rounds.length;
   }
 
   private async openDispute(roundId: Hex): Promise<Hex> {

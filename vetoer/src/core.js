@@ -4,6 +4,24 @@
 
 export const VERDICT_VOID = 1;
 export const PRICE_DECIMALS = 18;
+export const STATUS_NONE = 0;
+export const STATUS_DISPUTED = 4;
+
+/**
+ * Rounds of every market whose close boundary is in (now - windowSeconds, now], as { marketId, start }.
+ * Round ids are keccak256(abi.encode(marketId, uint64 start)), computed by the caller.
+ */
+export function candidateStarts(markets, now, windowSeconds) {
+  const out = [];
+  for (const m of markets) {
+    const interval = Number(m.interval);
+    if (!(interval > 0)) continue;
+    for (let closeAt = Math.floor(now / interval) * interval; closeAt > now - windowSeconds; closeAt -= interval) {
+      out.push({ marketId: m.marketId, start: closeAt - interval });
+    }
+  }
+  return out;
+}
 
 /** Decodes a left aligned bytes32 ticker such as bytes32("BTC") into "BTC". */
 export function assetSymbol(assetId) {
@@ -35,7 +53,7 @@ export function vetoReason(review, roundId, asset, round) {
 }
 
 /**
- * One pass. `chain` gives: voidProposals() -> [{ roundId, genlayerTxRef }] of recent VOID proposals,
+ * One pass. `chain` gives: voidProposals() -> [{ roundId, genlayerTxRef }] of the VOIDs pending on disputed rounds,
  * pendingVoid(roundId) -> executeAfter (0n when none), round(roundId), assetOf(round), veto(roundId) -> tx hash.
  * `readReview(roundId)` returns the parsed FINALIZED review or undefined. Returns a summary.
  */

@@ -63,37 +63,6 @@ export const receiverAbi = [
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "event",
-    "name": "VerdictProposed",
-    "inputs": [
-      {
-        "name": "roundId",
-        "type": "bytes32",
-        "indexed": true,
-        "internalType": "bytes32"
-      },
-      {
-        "name": "verdict",
-        "type": "uint8",
-        "indexed": false,
-        "internalType": "enum PredictionMarket.Verdict"
-      },
-      {
-        "name": "genlayerTxRef",
-        "type": "bytes32",
-        "indexed": false,
-        "internalType": "bytes32"
-      },
-      {
-        "name": "executeAfter",
-        "type": "uint64",
-        "indexed": false,
-        "internalType": "uint64"
-      }
-    ],
-    "anonymous": false
   }
 ];
 
@@ -150,6 +119,19 @@ export const lensAbi = [
             "internalType": "bytes32"
           }
         ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getMarketIds",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "ids",
+        "type": "bytes32[]",
+        "internalType": "bytes32[]"
       }
     ],
     "stateMutability": "view"
