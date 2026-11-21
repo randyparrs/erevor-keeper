@@ -76,3 +76,10 @@ test("rpc-check finds the largest eth_getLogs range an endpoint accepts and chec
   assert.equal(wrongChain.ok, false);
   assert.match(wrongChain.error!, /chain id 421614, expected 1/);
 });
+
+test("rpc-check reports the underlying HTTP failure, not viem's generic wrapper, and no URL", async () => {
+  const r = await checkEndpoint("fallback", FALLBACK, 421614, MARKET, 390, (async () => new Response("unauthorized", { status: 401 })) as unknown as typeof fetch);
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /HTTP 401/);
+  assert.ok(!r.error!.includes("secret-api-key"));
+});

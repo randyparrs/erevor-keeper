@@ -17,6 +17,17 @@ export interface EndpointCheck {
   error?: string;
 }
 
+/** The causes of an error, outermost first: viem wraps transport failures in a generic message. */
+export function errorChain(err: unknown): string {
+  const parts: string[] = [];
+  let e: any = err;
+  for (let i = 0; e && i < 6; i++, e = e.cause) {
+    const text = String(e.details ?? e.shortMessage ?? e.message ?? e).split("\n")[0];
+    if (text && !parts.includes(text)) parts.push(text);
+  }
+  return parts.join(" <- ");
+}
+
 /** Removes the endpoint URLs (and anything shaped like a URL) from an error text. */
 export function redactUrls(text: string, urls: (string | undefined)[]): string {
   let out = text;
@@ -55,7 +66,7 @@ export async function checkEndpoint(
     }
     return { endpoint, ok: true, chainId: id, latestBlock: latest.toString(), logsChunkBlocks: chunk.toString(), logs };
   } catch (err) {
-    return { endpoint, ok: false, error: redactUrls(err instanceof Error ? err.message : String(err), [url]).split("\n")[0] };
+    return { endpoint, ok: false, error: redactUrls(errorChain(err), [url]) };
   }
 }
 
