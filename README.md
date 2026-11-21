@@ -36,6 +36,29 @@ each boundary. Repository secrets:
 
 `.github/workflows/ci.yml` runs `npm test` on every push.
 
+## Guardian workflows
+
+Disputed rounds are reviewed by the erevor-guardian intelligent contract on GenLayer Bradbury and the verdict is
+applied on Arbitrum Sepolia through `GuardianReceiver` (see the Erevor repository for the trust model). Two more
+workflows run `node dist/src/guardian/index.js <role>`, each triggered by cron-job.org through `workflow_dispatch`,
+with GitHub's schedule as a backup:
+
+| Workflow | Minutes | Role |
+|---|---|---|
+| `guardian-vigilante.yml` | 1, 6, ..., 56 | after each close, applies the guardian rule to the exchange data and disputes the round if it says VOID; as the vetoer, vetoes every pending VOID not backed by a FINALIZED VOID review with the recorded prices |
+| `guardian-relayer.yml` | 2, 7, ..., 57 | for each round still Disputed, requests the GenLayer review if none is FINALIZED, waits for it and proposes the verdict to `GuardianReceiver`; executes pending VOIDs once their veto delay has passed |
+
+| Secret or variable | Value |
+|---|---|
+| `RELAYER_PRIVATE_KEY` (secret) | Relayer wallet: the guardian contract's `reviewer` and `GuardianReceiver`'s relayer. GEN on Bradbury and Arbitrum Sepolia ETH. |
+| `VETOER_PRIVATE_KEY` (secret) | `GuardianReceiver`'s vetoer. Arbitrum Sepolia ETH. |
+| `VIGILANTE_PRIVATE_KEY` (secret) | Opens disputes; no role. Arbitrum Sepolia ETH; mints its bond from the testnet token faucet. |
+| `GUARDIAN_RECEIVER_ADDRESS` (variable) | `GuardianReceiver` on Arbitrum Sepolia. |
+| `GUARDIAN_GL_ADDRESS` (variable) | erevor-guardian on GenLayer Bradbury. |
+
+Each pass logs one summary line (`relayer pass`, `vigilante pass`) and fails on any error line, such as `VETO`,
+`REVIEW_NOT_FINAL` or a dispute close to its timeout without a verdict. Locally the roles read `.env.guardian`.
+
 ## Running locally
 
 Requirements: Node.js 20.12 or newer.
