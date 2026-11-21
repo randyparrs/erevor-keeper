@@ -2,9 +2,8 @@ name: Erevor Guardian Vigilante
 
 # Runs right after each 5 minute boundary. It compares the lock and close prices of every round closed with bets on
 # both sides against the median of the exchange sources (the guardian rule) and opens a dispute from its own wallet
-# when the rule says VOID, inside the 300 second dispute window. As the vetoer, with a separate key, it checks every
-# pending VOID on GuardianReceiver against the FINALIZED review on GenLayer and vetoes any VOID that the review does
-# not back; a veto fails the run so GitHub notifies. Triggered by cron-job.org at minutes 0,5,...,55 plus 20 seconds
+# when the rule says VOID, inside the 300 second dispute window. It holds no veto power: the vetoer runs in the
+# erevor-vetoer Cloudflare Worker (vetoer/), apart from GitHub. Triggered by cron-job.org at minutes 1,6,...,56
 # (workflow_dispatch), with GitHub's schedule as backup.
 
 on:
@@ -29,7 +28,7 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm run build
-      - name: Check closes and pending VOID verdicts
+      - name: Check closes
         run: node dist/src/guardian/index.js vigilante
         env:
           RPC_URL: https://sepolia-rollup.arbitrum.io/rpc
@@ -40,5 +39,4 @@ jobs:
           GUARDIAN_GL_ADDRESS: ${{ vars.GUARDIAN_GL_ADDRESS }}
           GL_NODE: https://rpc-bradbury.genlayer.com
           VIGILANTE_PRIVATE_KEY: ${{ secrets.VIGILANTE_PRIVATE_KEY }}
-          VETOER_PRIVATE_KEY: ${{ secrets.VETOER_PRIVATE_KEY }}
           LOOKBACK_MINUTES: '10'

@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     cfg.lookbackMinutes = Number(process.env.LOOKBACK_MINUTES ?? "390");
     await new Relayer(cfg, key("RELAYER_PRIVATE_KEY")).run();
   } else if (role === "vigilante") {
-    await new Vigilante(cfg, key("VIGILANTE_PRIVATE_KEY"), key("VETOER_PRIVATE_KEY")).run();
+    await new Vigilante(cfg, key("VIGILANTE_PRIVATE_KEY")).run();
   } else {
     throw new Error("usage: guardian/index.js relayer | vigilante");
   }

@@ -1,0 +1,15 @@
+{
+  "name": "erevor-vetoer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that vetoes VOID verdicts not backed by the GenLayer review, apart from the relayer",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/core.test.js",
+    "sync-abi": "node scripts/sync-abi.mjs"
+  },
+  "dependencies": {
+    "genlayer-js": "2.0.0-rc.2",
+    "viem": "2.58.0"
+  }
+}

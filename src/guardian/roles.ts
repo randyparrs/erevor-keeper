@@ -2,8 +2,8 @@
 //   relayer    reviews every open dispute on GenLayer, then carries the FINALIZED verdict to GuardianReceiver
 //              (VALID applied at once, VOID after the veto delay, which it also executes once due).
 //   vigilante  after each close compares the recorded lock and close prices with the exchange medians (the guardian
-//              rule) and opens a dispute when the rule says VOID; as the vetoer it checks every pending VOID against
-//              the review stored on GenLayer and vetoes any VOID that does not match it.
+//              rule) and opens a dispute when the rule says VOID. It holds no veto power: the vetoer runs apart, in
+//              the erevor-vetoer Cloudflare Worker (vetoer/), so the relayer and the vetoer never share a platform.
 // Any error is logged at error level, so the pass exits with code 1 and GitHub notifies.
 
 import {
@@ -69,8 +69,9 @@ export function reviewInputs(roundId: Hex, asset: string, r: RoundView): [string
 }
 
 /**
- * Why a pending VOID must be vetoed, or undefined when the review stored on GenLayer backs it: a FINALIZED review
- * for this round with verdict VOID and exactly the recorded asset, timestamps and prices.
+ * Why a VOID review does not back a VOID for this round, or undefined when it does: a FINALIZED review for this round
+ * with verdict VOID and exactly the recorded asset, timestamps and prices. The relayer refuses to propose a VOID
+ * otherwise; the vetoer Worker (vetoer/src/core.js) applies the same rule on its own.
  */
 export function vetoReason(review: ReviewRecord | undefined, roundId: Hex, asset: string, r: RoundView): string | undefined {
   if (!review) return "no finalized review for this round on GenLayer";
@@ -205,20 +206,13 @@ export class Vigilante extends Base {
   constructor(
     cfg: GuardianConfig,
     private readonly vigilanteKey: Hex,
-    private readonly vetoerKey: Hex,
   ) {
     super(cfg);
   }
 
   async run(): Promise<void> {
     const closesSeen = await this.watchCloses();
-    const voidProposalsSeen = await this.watchVoids();
-    log("info", "vigilante pass", {
-      vigilante: privateKeyToAccount(this.vigilanteKey).address,
-      vetoer: privateKeyToAccount(this.vetoerKey).address,
-      closesSeen,
-      voidProposalsSeen,
-    });
+    log("info", "vigilante pass", { vigilante: privateKeyToAccount(this.vigilanteKey).address, closesSeen });
   }
 
   /** Disputes a just closed round when the guardian rule, applied to the exchange data, says VOID. */
@@ -264,32 +258,5 @@ export class Vigilante extends Base {
     const allowance = (await this.pub.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [me, this.cfg.market] })) as bigint;
     if (allowance < bond) await this.send(this.vigilanteKey, token, erc20Abi, "approve", [this.cfg.market, 2n ** 256n - 1n]);
     return this.send(this.vigilanteKey, this.cfg.market, predictionMarketAbi, "dispute", [roundId]);
-  }
-
-  /** Vetoes every pending VOID that the review stored on GenLayer does not back. */
-  private async watchVoids(): Promise<number> {
-    const me = privateKeyToAccount(this.vetoerKey).address;
-    const gl = new GuardianGL(this.cfg.guardianGL, me, undefined, this.cfg.glNode);
-    const delay = (await this.pub.readContract({ address: this.cfg.receiver, abi: guardianReceiverAbi, functionName: "vetoDelay" })) as bigint;
-    const proposals = await this.recentLogs(this.cfg.receiver, guardianReceiverAbi, "VerdictProposed", Number(delay) / 60 + this.cfg.lookbackMinutes);
-    for (const l of proposals) {
-      if (Number(l.args.verdict) !== VERDICT_VOID) continue;
-      const roundId = l.args.roundId as Hex;
-      try {
-        const [executeAfter] = (await this.pub.readContract({ address: this.cfg.receiver, abi: guardianReceiverAbi, functionName: "pendingVoid", args: [roundId] })) as readonly [bigint, Hex];
-        if (executeAfter === 0n) continue;
-        const r = await this.round(roundId);
-        const reason = vetoReason(await gl.finalReview(roundId), roundId, await this.assetOf(r), r);
-        if (reason === undefined) {
-          log("info", "pending VOID matches the GenLayer review", { roundId, genlayerTxRef: l.args.genlayerTxRef });
-          continue;
-        }
-        const tx = await this.send(this.vetoerKey, this.cfg.receiver, guardianReceiverAbi, "vetoVerdict", [roundId]);
-        log("error", "VETO", { roundId, reason, genlayerTxRef: l.args.genlayerTxRef, tx });
-      } catch (err) {
-        log("error", "vetoer failed on a pending VOID", { roundId, error: err instanceof Error ? err.message : String(err) });
-      }
-    }
-    return proposals.filter((l) => Number(l.args.verdict) === VERDICT_VOID).length;
   }
 }

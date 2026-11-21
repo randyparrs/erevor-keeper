@@ -21,3 +21,7 @@ jobs:
       - run: npm ci --no-audit --no-fund
 
       - run: npm test
+
+      - name: Vetoer Worker tests
+        working-directory: vetoer
+        run: npm ci --no-audit --no-fund && npm test

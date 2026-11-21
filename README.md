@@ -45,19 +45,36 @@ with GitHub's schedule as a backup:
 
 | Workflow | Minutes | Role |
 |---|---|---|
-| `guardian-vigilante.yml` | 1, 6, ..., 56 | after each close, applies the guardian rule to the exchange data and disputes the round if it says VOID; as the vetoer, vetoes every pending VOID not backed by a FINALIZED VOID review with the recorded prices |
+| `guardian-vigilante.yml` | 1, 6, ..., 56 | after each close, applies the guardian rule to the exchange data and disputes the round if it says VOID; it has no veto power |
 | `guardian-relayer.yml` | 2, 7, ..., 57 | for each round still Disputed, requests the GenLayer review if none is FINALIZED, waits for it and proposes the verdict to `GuardianReceiver`; executes pending VOIDs once their veto delay has passed |
 
 | Secret or variable | Value |
 |---|---|
 | `RELAYER_PRIVATE_KEY` (secret) | Relayer wallet: the guardian contract's `reviewer` and `GuardianReceiver`'s relayer. GEN on Bradbury and Arbitrum Sepolia ETH. |
-| `VETOER_PRIVATE_KEY` (secret) | `GuardianReceiver`'s vetoer. Arbitrum Sepolia ETH. |
 | `VIGILANTE_PRIVATE_KEY` (secret) | Opens disputes; no role. Arbitrum Sepolia ETH; mints its bond from the testnet token faucet. |
 | `GUARDIAN_RECEIVER_ADDRESS` (variable) | `GuardianReceiver` on Arbitrum Sepolia. |
 | `GUARDIAN_GL_ADDRESS` (variable) | erevor-guardian on GenLayer Bradbury. |
 
-Each pass logs one summary line (`relayer pass`, `vigilante pass`) and fails on any error line, such as `VETO`,
+Each pass logs one summary line (`relayer pass`, `vigilante pass`) and fails on any error line, such as
 `REVIEW_NOT_FINAL` or a dispute close to its timeout without a verdict. Locally the roles read `.env.guardian`.
+
+## Vetoer (Cloudflare Worker)
+
+`GuardianReceiver`'s vetoer does not run on GitHub: it is the `erevor-vetoer` Cloudflare Worker in `vetoer/`, with its
+own secrets (`VETOER_PRIVATE_KEY`, `ARB_RPC_URL`, `GL_NODE`), so an account compromise on one platform cannot both
+propose and let through a VOID. A Cron Trigger runs it every minute: every VOID proposed in the last 30 minutes plus
+the veto delay that is still pending is checked against the review stored on GenLayer (`get_review`, latest
+FINALIZED state) and vetoed unless a VOID review with exactly the recorded asset, timestamps, prices and outcome backs
+it. Each decision is logged (Workers Logs). `GET /health` answers 503 when passes stop for 10 minutes, a pass fails,
+or a veto happened in the last hour; an external monitor (cron-job.org with failure notifications) checks it.
+
+```bash
+cd vetoer && npm ci && npm test
+```
+
+Deploy (from `vetoer/`, with `npx --yes wrangler@4`): create the KV namespace (`kv namespace create HEALTH`) and put
+its id in `wrangler.toml`, set the three secrets with `secret put`, then `deploy`. After a contract change, run
+`npm run build` at the root and `npm run sync-abi` in `vetoer/`.
 
 ## Running locally
 
