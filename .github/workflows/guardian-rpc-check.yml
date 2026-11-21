@@ -1,0 +1,32 @@
+name: Erevor Guardian RPC Check
+
+# Manual check of the guardian RPCs, each on its own: the public Arbitrum Sepolia RPC (primary) and the
+# GUARDIAN_RPC_FALLBACK_URL secret (fallback). It runs the calls the relayer and the vigilante make (chain id, latest
+# block, eth_getLogs over the relayer's 6.5 hour window) and logs which endpoint passed, never the URLs.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rpc-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci --prefer-offline --no-audit --no-fund
+      - run: npm run build
+      - name: Check both RPC endpoints
+        run: node dist/src/guardian/index.js rpc-check
+        env:
+          RPC_URL: https://sepolia-rollup.arbitrum.io/rpc
+          RPC_FALLBACK_URL: ${{ secrets.GUARDIAN_RPC_FALLBACK_URL }}
+          CHAIN_ID: '421614'
+          MARKET_ADDRESS: '0x0008917F984e12142a48eE3133e2153B30BCBC63'
+          LENS_ADDRESS: '0x6C097F874C815B8Da7EeF1c4B07f1E1D282eDcbA'
+          RECEIVER_ADDRESS: ${{ vars.GUARDIAN_RECEIVER_ADDRESS }}
+          GUARDIAN_GL_ADDRESS: ${{ vars.GUARDIAN_GL_ADDRESS }}

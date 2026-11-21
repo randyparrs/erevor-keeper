@@ -32,6 +32,7 @@ jobs:
         run: node dist/src/guardian/index.js vigilante
         env:
           RPC_URL: https://sepolia-rollup.arbitrum.io/rpc
+          RPC_FALLBACK_URL: ${{ secrets.GUARDIAN_RPC_FALLBACK_URL }}
           CHAIN_ID: '421614'
           MARKET_ADDRESS: '0x0008917F984e12142a48eE3133e2153B30BCBC63'
           LENS_ADDRESS: '0x6C097F874C815B8Da7EeF1c4B07f1E1D282eDcbA'

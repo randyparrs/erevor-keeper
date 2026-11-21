@@ -52,8 +52,14 @@ with GitHub's schedule as a backup:
 |---|---|
 | `RELAYER_PRIVATE_KEY` (secret) | Relayer wallet: the guardian contract's `reviewer` and `GuardianReceiver`'s relayer. GEN on Bradbury and Arbitrum Sepolia ETH. |
 | `VIGILANTE_PRIVATE_KEY` (secret) | Opens disputes; no role. Arbitrum Sepolia ETH; mints its bond from the testnet token faucet. |
+| `GUARDIAN_RPC_FALLBACK_URL` (secret) | Fallback Arbitrum Sepolia RPC (Chainstack). Never the vetoer Worker's provider. |
 | `GUARDIAN_RECEIVER_ADDRESS` (variable) | `GuardianReceiver` on Arbitrum Sepolia. |
 | `GUARDIAN_GL_ADDRESS` (variable) | erevor-guardian on GenLayer Bradbury. |
+
+RPC: the public Arbitrum Sepolia RPC is the primary. Each call is retried twice with backoff (`rpc retry`), then sent
+to the fallback (`rpc fallback used`, a warning with the method and the reason), then fails the pass with code 1.
+`eth_getLogs` ranges are halved when a provider refuses them. `guardian-rpc-check.yml` (manual) checks both endpoints
+on their own and logs which one passed, never the URLs.
 
 Each pass logs one summary line (`relayer pass`, `vigilante pass`) and fails on any error line, such as
 `REVIEW_NOT_FINAL` or a dispute close to its timeout without a verdict. Locally the roles read `.env.guardian`.

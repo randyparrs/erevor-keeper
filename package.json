@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/test/unit.test.js dist/test/events.test.js dist/test/rpc.test.js dist/test/plan.test.js dist/test/once.test.js dist/test/hermes.test.js dist/test/keeper.test.js dist/test/guardian.test.js",
+    "test": "npm run build && node --test dist/test/unit.test.js dist/test/events.test.js dist/test/rpc.test.js dist/test/plan.test.js dist/test/once.test.js dist/test/hermes.test.js dist/test/keeper.test.js dist/test/guardian.test.js dist/test/guardian-rpc.test.js",
     "start": "node dist/src/index.js",
     "once": "node dist/src/index.js --once"
   },

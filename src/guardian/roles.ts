@@ -9,7 +9,7 @@
 import {
   createPublicClient,
   createWalletClient,
-  http,
+  custom,
   keccak256,
   parseAbi,
   toHex,
@@ -21,7 +21,8 @@ import { privateKeyToAccount } from "viem/accounts";
 import { guardianReceiverAbi, predictionMarketAbi, predictionMarketLensAbi } from "../abi.js";
 import { assetIdToSymbol } from "../ids.js";
 import { log } from "../log.js";
-import { makeChain } from "../keeper.js";
+import { logRpcEvent, makeChain } from "../keeper.js";
+import { RpcProvider } from "../rpc.js";
 import { GuardianGL, type ReviewRecord } from "./genlayer.js";
 import { TOLERANCE_BPS, decide, direction, fetchPrices, type Outcome } from "./rule.js";
 
@@ -39,6 +40,8 @@ const erc20Abi = parseAbi([
 
 export interface GuardianConfig {
   rpcUrl: string;
+  /** Used only after the primary RPC failed its retries. Must not be the vetoer Worker's provider. */
+  rpcFallbackUrl?: string;
   chainId: number;
   market: Address;
   lens: Address;
@@ -91,17 +94,35 @@ export function reviewRef(review: ReviewRecord): Hex {
   return keccak256(toHex(JSON.stringify(review)));
 }
 
+/** RPC of the guardian roles: the primary with 2 retries and backoff, then the fallback with the same, then the error. */
+export function guardianRpc(cfg: Pick<GuardianConfig, "rpcUrl" | "rpcFallbackUrl">, overrides: Partial<ConstructorParameters<typeof RpcProvider>[0]> = {}): RpcProvider {
+  return new RpcProvider({
+    primaryUrl: cfg.rpcUrl,
+    fallbackUrl: cfg.rpcFallbackUrl,
+    timeoutMs: 15_000,
+    maxRetries: 2,
+    baseDelayMs: 500,
+    maxDelayMs: 4_000,
+    defaultBudgetMs: 60_000,
+    onEvent: logRpcEvent,
+    ...overrides,
+  });
+}
+
 class Base {
   readonly pub: PublicClient;
   readonly chain;
+  private readonly transport;
 
   constructor(readonly cfg: GuardianConfig) {
     this.chain = makeChain(cfg.chainId, cfg.rpcUrl);
-    this.pub = createPublicClient({ chain: this.chain, transport: http(cfg.rpcUrl) }) as PublicClient;
+    const rpc = guardianRpc(cfg);
+    this.transport = custom({ request: (a) => rpc.request(a) }, { retryCount: 0 });
+    this.pub = createPublicClient({ chain: this.chain, transport: this.transport }) as PublicClient;
   }
 
   wallet(key: Hex) {
-    return createWalletClient({ chain: this.chain, transport: http(this.cfg.rpcUrl), account: privateKeyToAccount(key) });
+    return createWalletClient({ chain: this.chain, transport: this.transport, account: privateKeyToAccount(key) });
   }
 
   async round(roundId: Hex): Promise<RoundView> {
@@ -120,9 +141,17 @@ class Base {
     const from = latest > span ? latest - span : 0n;
     const event = (abi as any[]).find((x) => x.type === "event" && x.name === eventName);
     const out: any[] = [];
-    for (let start = from; start <= latest; start += 200_000n) {
-      const end = start + 199_999n > latest ? latest : start + 199_999n;
-      out.push(...(await this.pub.getLogs({ address, event, fromBlock: start, toBlock: end } as any)));
+    // Providers cap the block range of eth_getLogs differently: halve the chunk on a refused range.
+    let chunk = 200_000n;
+    for (let start = from; start <= latest; ) {
+      const end = start + chunk - 1n > latest ? latest : start + chunk - 1n;
+      try {
+        out.push(...(await this.pub.getLogs({ address, event, fromBlock: start, toBlock: end } as any)));
+        start = end + 1n;
+      } catch (err) {
+        if (chunk <= 1_000n) throw err;
+        chunk /= 2n;
+      }
     }
     return out;
   }
